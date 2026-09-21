@@ -60,6 +60,7 @@ async def run_startup() -> dict[str, str]:
     results["cache"] = await _warm_caches()
     results["otel"] = _setup_otel()
     results["telemetry"] = _setup_telemetry()
+    results["catalogue_safety"] = await _validate_catalogue_safety()
 
     _upgrade_signal_handlers()
 
@@ -441,6 +442,28 @@ def _setup_telemetry() -> str:
         return "ok"
     except Exception as exc:
         logger.warning("Telemetry setup failed: %s", exc)
+        return f"warning: {exc}"
+
+
+async def _validate_catalogue_safety() -> str:
+    """Scan catalogue-sourced subagent/skill metadata for injection/unsafe content.
+
+    Must run after ``_setup_telemetry()`` so Guardian is initialised first
+    (when enabled). No-op when guardrails are disabled — see OFFSEC-379.
+    """
+    try:
+        from deep_agent.src.agent.config import agent_config
+        from deep_agent.src.agent.config.catalogue_safety import (
+            scan_catalogue_safety,
+        )
+
+        summary = await scan_catalogue_safety(agent_config)
+        excluded = len(summary["subagents_excluded"]) + len(summary["skills_excluded"])
+        if excluded:
+            return f"warning: excluded {excluded} unsafe catalogue item(s): {summary}"
+        return "ok"
+    except Exception as exc:
+        logger.warning("Catalogue safety scan failed: %s", exc)
         return f"warning: {exc}"
 
 
