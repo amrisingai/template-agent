@@ -510,6 +510,4 @@ Researcher prompt.
         assert "unsafe-skill" not in skills
         assert "analyst" in subs
         assert all("unsafe-skill" not in p for p in orchestrator["skill_paths"])
-        assert all(
-            "unsafe-skill" not in p for p in subs["analyst"]["skill_paths"]
-        )
+        assert all("unsafe-skill" not in p for p in subs["analyst"]["skill_paths"])

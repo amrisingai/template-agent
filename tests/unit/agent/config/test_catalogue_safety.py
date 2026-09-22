@@ -108,9 +108,7 @@ class TestCheckContentSafety:
 class TestScanCatalogueSafety:
     @pytest.mark.asyncio
     async def test_noop_when_guardrails_disabled(self, tmp_path):
-        config = _make_config_mock(
-            subagents={"a": {"description": "x", "body": "y"}}
-        )
+        config = _make_config_mock(subagents={"a": {"description": "x", "body": "y"}})
         with (
             patch(
                 "deep_agent.src.agent.config.catalogue_safety.get_guardrails_config",
@@ -135,7 +133,9 @@ class TestScanCatalogueSafety:
         )
 
         config = _make_config_mock(
-            subagents={"analyst": {"description": "Analyzes data.", "body": "Be helpful."}},
+            subagents={
+                "analyst": {"description": "Analyzes data.", "body": "Be helpful."}
+            },
             skills={"safe-skill": skill_dir},
         )
 
