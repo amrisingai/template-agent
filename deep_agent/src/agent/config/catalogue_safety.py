@@ -1,44 +1,28 @@
 """Startup-time safety scan over catalogue-sourced subagent and skill content.
 
-Subagent descriptions/bodies and skill ``SKILL.md`` content originate in the
-shared package catalogue and may be authored by a different user or org than
-the one deploying this agent (see OFFSEC-379: "The catalogue is a cross
-tenant prompt injection distribution channel"). Unlike user input, tool
-results, LLM output, and memory writes, this content was never passed
-through Granite Guardian before entering the agent's context — it is
-trusted purely because it passed structural validation at publish time in
-the registry.
+Subagent descriptions/bodies and skill ``SKILL.md`` content come from the
+shared package catalogue, which may be authored by a different org than the
+one deploying this agent — a cross-tenant prompt-injection distribution
+channel that, unlike user input or tool output, never passes through
+Granite Guardian before entering the agent's context. This module runs
+Guardian's ``check_safety``/``check_injection`` checks (see
+``deep_agent.src.guardrails.client``) over that content and excludes —
+rather than blocking the whole agent on — any subagent or skill flagged
+unsafe or as a prompt-injection attempt.
 
-This module runs the existing Guardian ``check_safety`` / ``check_injection``
-checks (see ``deep_agent.src.guardrails.client``) over that content once, at
-startup, and excludes — rather than blocks the whole agent on — any subagent
-or skill whose metadata is flagged unsafe or as a prompt-injection attempt.
-This preserves availability: a single compromised or malicious catalogue
-package cannot take down an agent that otherwise depends on it.
-
-``AgentConfig`` reloads all subagent/skill config from disk on every access
-when ``settings.CONFIG_AUTO_RELOAD`` is set (the default) — see
-``AgentConfig._ensure_loaded``. That reload previously bypassed this scan
-entirely: new/modified catalogue content could reach graph construction
-without ever going through Guardian. To close that gap without turning every
-reload into 2xN additional Guardian HTTP round-trips, every subagent/skill is
-scanned against a content fingerprint (``_content_fingerprint``) of the last
-version that was successfully scanned as safe. Unchanged content is skipped;
-Guardian is only called for entries that are new or whose content actually
-changed. ``ensure_catalogue_safety_scanned`` wires this into the per-request
-graph-construction path (see ``deep_agent/aegra/graph.py``); the one-time
-``scan_catalogue_safety`` startup call and this incremental rescan share the
-same underlying ``_scan_subagents``/``_scan_skills`` — at startup there are
-no fingerprints yet, so everything is treated as new (a full scan), exactly
-matching the previous startup-only behavior.
+``AgentConfig`` reloads subagent/skill config from disk on every access
+under ``CONFIG_AUTO_RELOAD`` (the default), which would otherwise let
+new/modified content reach graph construction without ever being scanned.
+To avoid a Guardian round-trip on every reload, each entry is checked
+against a content fingerprint (``_content_fingerprint``) of the last
+version scanned safe; unchanged content is skipped.
+``ensure_catalogue_safety_scanned`` wires this into the per-request graph
+path (see ``deep_agent/aegra/graph.py``) and shares its scan logic with the
+one-time startup scan (``scan_catalogue_safety``).
 
 Functions:
-    scan_catalogue_safety: One-time full scan of all loaded subagents/skills,
-        run once at startup (see ``deep_agent/aegra/startup.py``).
-    ensure_catalogue_safety_scanned: Per-request/per-invocation hook that
-        triggers AgentConfig's normal reload-from-disk and then incrementally
-        rescans only new/changed catalogue content before it becomes
-        available to graph construction (OFFSEC-379).
+    scan_catalogue_safety: One-time full scan at startup.
+    ensure_catalogue_safety_scanned: Per-request reload + incremental rescan.
 """
 
 from __future__ import annotations
@@ -58,22 +42,17 @@ if TYPE_CHECKING:
 
 logger = get_python_logger()
 
-# Serializes ensure_catalogue_safety_scanned so that a burst of concurrent
-# requests arriving while a subagent/skill's content is new/changed doesn't
-# each independently fire the same 2 Guardian calls for that entry before any
-# of them has recorded its fingerprint. Not used by scan_catalogue_safety —
-# the one-time startup scan has no concurrent callers.
+# Serializes ensure_catalogue_safety_scanned so concurrent requests don't
+# each redundantly Guardian-scan the same new/changed entry. Not used by
+# scan_catalogue_safety, which has no concurrent callers.
 _rescan_lock = asyncio.Lock()
 
 
 def _content_fingerprint(content: str) -> str:
     """Stable fingerprint of scanned content, used to detect catalogue changes.
 
-    Two calls with the same *content* always produce the same fingerprint;
-    any change to the content (a single character) produces a different one.
-    Used to skip re-running Guardian's ``check_safety``/``check_injection``
-    HTTP calls for subagent/skill content that hasn't changed since it was
-    last successfully scanned as safe (OFFSEC-379).
+    Used to skip Guardian's ``check_safety``/``check_injection`` calls for
+    content that hasn't changed since it was last scanned as safe.
 
     Args:
         content: The scanned text (e.g. a subagent's description + body).
@@ -116,20 +95,15 @@ async def _scan_subagents(
 ) -> list[str]:
     """Scan subagents whose content is new or changed. Returns excluded names.
 
-    Subagents whose ``description``+``body`` fingerprint matches the last
-    successful scan (``AgentConfig.get_subagent_scan_fingerprint``) are
-    skipped entirely — no Guardian calls. New subagents (never scanned) and
-    subagents whose content changed since the last scan are always scanned;
-    on success their fingerprint is recorded so the next call can skip them.
+    Subagents whose fingerprint matches the last successful scan are
+    skipped (no Guardian calls); new or changed content is scanned and its
+    fingerprint recorded on success.
 
     Args:
         config: The ``AgentConfig`` singleton to mutate via ``exclude_subagent``.
-        subagent_configs: The exact subagent-config dict to scan — the caller's
-            pinned snapshot (e.g. from ``AgentConfig.get_catalogue_snapshot``),
-            *not* re-fetched here, so the content scanned below is provably the
-            same content the caller will use to build the graph (OFFSEC-379:
-            avoids a TOCTOU gap from re-reading through an auto-reloading
-            getter after this function's ``await`` points).
+        subagent_configs: The caller's pinned snapshot to scan — not
+            re-fetched here, to avoid a TOCTOU gap from re-reading through
+            an auto-reloading getter after this function's ``await`` points.
     """
     excluded: list[str] = []
 
@@ -156,12 +130,9 @@ async def _scan_subagents(
             check=failed_check,
             verdict=verdict,
         )
-        # exclude_subagent() calls AgentConfig._ensure_loaded() internally,
-        # which — under CONFIG_AUTO_RELOAD — performs a full synchronous
-        # reload from disk (re-reading/parsing every subagent .md and
-        # SKILL.md file), not just a dict pop. Offload it so a single
-        # flagged entry doesn't block the event loop for other in-flight
-        # requests (OFFSEC-379).
+        # exclude_subagent() triggers a full synchronous reload under
+        # CONFIG_AUTO_RELOAD, not just a dict pop — offload it so one
+        # flagged entry doesn't block the event loop.
         await asyncio.to_thread(
             config.exclude_subagent,
             name,
@@ -175,21 +146,17 @@ async def _scan_subagents(
 def _read_skill_frontmatter(skill_md: Path) -> dict[str, Any] | None:
     """Sync helper for ``_scan_skills``: read+parse one ``SKILL.md`` off the event loop.
 
-    Bundles the ``Path.is_file()`` check and ``parse_frontmatter()`` read into
-    a single synchronous unit so ``_scan_skills`` can offload both with one
-    ``asyncio.to_thread`` call per skill instead of two (OFFSEC-379).
+    Bundles the file check and frontmatter read into one synchronous unit so
+    ``_scan_skills`` can offload both with a single ``asyncio.to_thread`` call.
 
     Args:
         skill_md: Path to the skill's ``SKILL.md`` file.
 
     Returns:
-        The parsed frontmatter dict, or ``None`` if *skill_md* doesn't exist
-        (nothing to scan — the existing skill loading path already tolerates
-        this).
+        The parsed frontmatter dict, or ``None`` if *skill_md* doesn't exist.
 
     Raises:
-        Exception: Whatever ``parse_frontmatter`` raises on malformed content;
-            propagated unchanged to the caller.
+        Exception: Whatever ``parse_frontmatter`` raises on malformed content.
     """
     if not skill_md.is_file():
         return None
@@ -201,39 +168,31 @@ async def _scan_skills(
 ) -> list[str]:
     """Scan skills whose SKILL.md content is new or changed. Returns excluded names.
 
-    Skills whose ``description``+``body`` fingerprint matches the last
-    successful scan (``AgentConfig.get_skill_scan_fingerprint``) are skipped
-    entirely — no Guardian calls. New skills (never scanned) and skills whose
-    ``SKILL.md`` content changed since the last scan are always scanned; on
-    success their fingerprint is recorded so the next call can skip them.
+    Skills whose fingerprint matches the last successful scan are skipped
+    (no Guardian calls); new or changed content is scanned and its
+    fingerprint recorded on success.
 
     Args:
         config: The ``AgentConfig`` singleton to mutate via ``exclude_skill``.
-        available_skills: The exact skill-name -> directory-path mapping to
-            scan — the caller's pinned snapshot (e.g. from
-            ``AgentConfig.get_catalogue_snapshot``), *not* re-fetched here, so
-            the availability decided below is provably consistent with what
-            the caller will use to build the graph (OFFSEC-379).
+        available_skills: The caller's pinned skill-name -> directory-path
+            snapshot to scan — not re-fetched here, so availability stays
+            consistent with what the caller will use to build the graph.
     """
     excluded: list[str] = []
 
     for name, path in list(available_skills.items()):
         skill_md = path / "SKILL.md"
         try:
-            # Path.is_file() and reading/parsing SKILL.md are both
-            # synchronous filesystem calls — offload them to a worker thread
-            # so a large/slow catalogue doesn't block the event loop for
-            # other in-flight requests (OFFSEC-379).
+            # Both filesystem calls — offload to a worker thread so a
+            # large/slow catalogue doesn't block the event loop.
             skill_cfg: dict[str, Any] | None = await asyncio.to_thread(
                 _read_skill_frontmatter, skill_md
             )
         except Exception as exc:
-            # Fail closed: a SKILL.md that can't be parsed can't be scanned,
-            # but the directory-based skill index (_scan_available_skills)
-            # loads it regardless of parse success — unlike subagents, which
-            # are dropped entirely on a parse failure (_load_all_subagents).
-            # Leaving it available here would let a deliberately malformed
-            # frontmatter (with a malicious body) bypass this scan entirely.
+            # Fail closed: unlike subagents (dropped on parse failure by
+            # _load_all_subagents), the skill directory index still lists a
+            # skill even if its SKILL.md fails to parse. Leaving it
+            # available here would let malformed frontmatter bypass the scan.
             logger.warning(
                 "catalogue_content_unscannable",
                 kind="skill",
@@ -277,8 +236,7 @@ async def _scan_skills(
         )
         # exclude_skill() calls AgentConfig._ensure_loaded() internally,
         # which — under CONFIG_AUTO_RELOAD — performs a full synchronous
-        # reload from disk. Offload it, same as exclude_subagent() above
-        # (OFFSEC-379).
+        # reload from disk. Offload it, same as exclude_subagent() above.
         await asyncio.to_thread(
             config.exclude_skill,
             name,
@@ -292,15 +250,10 @@ async def _scan_skills(
 async def scan_catalogue_safety(config: "AgentConfig") -> dict[str, list[str]]:
     """Scan all loaded subagent and skill metadata for unsafe/injected content.
 
-    Run once at process startup (``run_startup()`` -> ``_validate_catalogue_safety()``),
-    before any fingerprints have been recorded — every subagent/skill is
-    therefore "new" and gets a full scan, same as before fingerprinting was
-    introduced. See ``ensure_catalogue_safety_scanned`` for the incremental
-    rescan that runs on every subsequent reload.
-
-    No-op when guardrails are disabled or not yet initialised — mirrors the
-    short-circuit in ``deep_agent.src.guardrails.client._call_guardian``, so
-    this scan never fails startup or blocks when Guardian is not configured.
+    Run once at startup, before any fingerprints exist, so every entry gets
+    a full scan. See ``ensure_catalogue_safety_scanned`` for the incremental
+    rescan used on every subsequent reload. No-op when guardrails are
+    disabled.
 
     Args:
         config: The loaded ``AgentConfig`` singleton to scan and mutate.
@@ -312,10 +265,9 @@ async def scan_catalogue_safety(config: "AgentConfig") -> dict[str, list[str]]:
         logger.info("catalogue_safety_scan_skipped", reason="guardrails_disabled")
         return {"subagents_excluded": [], "skills_excluded": []}
 
-    # Offloaded to a worker thread — same reasoning as the equivalent call in
-    # ensure_catalogue_safety_scanned: this reads/parses every subagent .md
-    # and SKILL.md file from disk and would otherwise block the startup
-    # event loop for the duration of that I/O (OFFSEC-379).
+    # Offloaded to a worker thread: reads/parses every subagent .md and
+    # SKILL.md file from disk, which would otherwise block the startup
+    # event loop.
     subagent_configs, available_skills = await asyncio.to_thread(
         config.get_catalogue_snapshot
     )
@@ -339,87 +291,50 @@ async def ensure_catalogue_safety_scanned(
 ) -> dict[str, Any]:
     """Reload-and-rescan hook for the per-request/per-invocation code path.
 
-    ``AgentConfig._ensure_loaded()`` reloads all subagent/skill config from
-    disk on every access when ``settings.CONFIG_AUTO_RELOAD`` is set (the
-    default) — but a reload alone only re-applies previously recorded
-    exclusions (``_reapply_exclusions``); it does not re-run the Guardian
-    scan over content that changed or was added since the last scan. Call
-    this early in any path that is about to hand ``AgentConfig`` subagent/
-    skill data to graph construction (e.g. ``deep_agent/aegra/graph.py``'s
-    ``agent()`` factory, which Aegra invokes per-request) so that gap is
-    closed *before* that data is read for that purpose (OFFSEC-379).
+    ``AgentConfig._ensure_loaded()`` reloads subagent/skill config from disk
+    on every access under ``CONFIG_AUTO_RELOAD`` (the default), but a reload
+    alone only re-applies previously recorded exclusions — it doesn't
+    rescan content that's new or changed since the last scan. Call this
+    before handing subagent/skill data to graph construction (e.g.
+    ``graph.py``'s ``agent()`` factory) to close that gap.
 
     Concretely, this:
 
-    1. Triggers exactly **one** reload-from-disk (via
-       ``AgentConfig.get_catalogue_snapshot``, off the event-loop thread —
-       see below) and lets ``_reapply_exclusions()`` remove anything already
-       flagged by a prior scan. Earlier revisions called
-       ``get_all_subagent_configs()`` up front and then let
-       ``_scan_subagents``/``_scan_skills`` each independently call their own
-       getter, which — because every ``AgentConfig`` getter reloads from disk
-       under ``CONFIG_AUTO_RELOAD`` — meant a single invocation of this
-       function triggered *three* full synchronous reloads instead of one,
-       and the last two ran after this function's own Guardian ``await``
-       points, so the content actually scanned in step 2 was not
-       provably the same content still present afterward (a TOCTOU gap).
-       Capturing one snapshot up front and threading it through closes both
-       problems at once.
-    2. Runs the incremental scan (``_scan_subagents`` / ``_scan_skills``)
-       *against that exact snapshot* — not by re-fetching from ``config`` —
-       so what gets scanned is provably what the caller will use afterward.
-       Only Guardian calls for subagents/skills whose content fingerprint is
-       new or changed since the last successful scan of that name —
-       unchanged entries never touch Guardian, so a request arriving while
-       nothing in the catalogue has changed costs zero extra HTTP calls, not
-       2xN.
-    3. Excludes (``exclude_subagent`` / ``exclude_skill``, same sticky
-       mechanism as the startup scan) anything newly flagged, before
-       returning — so the caller's subsequent reads of subagent/skill
-       config already reflect the exclusion. For an excluded skill, also
-       scrubs its resolved directory path out of every subagent's
-       ``skill_paths`` in the *pinned* ``subagent_configs`` snapshot being
-       returned (not just out of ``available_skills``) — each subagent's
-       ``skill_paths`` was already resolved/baked in eagerly at config-load
-       time (``AgentConfig._load_all_subagents``), and
-       ``load_subagents()`` reads that pre-baked list directly rather than
-       re-resolving it from ``available_skills`` per subagent. Without this,
-       a flagged skill's path would still reach the subagent skill loader
-       through this snapshot even though ``available_skills`` no longer
-       lists it (OFFSEC-379, CWE-74). ``AgentConfig.exclude_skill``'s own
-       ``_scrub_skill_path`` only scrubs AgentConfig's *live* state (for the
-       *next* reload) — it has no reach into this already-captured snapshot.
+    1. Takes exactly one snapshot (``AgentConfig.get_catalogue_snapshot``,
+       off-thread) instead of letting ``_scan_subagents``/``_scan_skills``
+       each independently call their own getter (which would each trigger
+       their own reload under ``CONFIG_AUTO_RELOAD``), so what gets scanned
+       is provably the same content returned to the caller (avoids a
+       TOCTOU gap).
+    2. Runs the incremental scan against that snapshot. Only subagents/
+       skills with a new or changed content fingerprint hit Guardian.
+    3. Excludes anything newly flagged and scrubs any excluded skill's path
+       out of the *pinned* snapshot's ``skill_paths`` too — not just out of
+       ``available_skills`` — since each subagent's ``skill_paths`` was
+       already baked in at config-load time and ``load_subagents()`` reads
+       that list directly (CWE-74: without this, an excluded skill's path
+       would still reach the subagent loader through this snapshot).
 
-    A process-wide lock now serializes both the reload (step 1) and the scan
-    (step 2), so a burst of concurrent requests can't each independently
-    trigger their own reload/scan for the same brand-new/changed entry before
-    the first one finishes and records its fingerprint.
-
-    Guardian is never touched when guardrails are disabled, mirroring
-    ``scan_catalogue_safety``'s short-circuit (the reload itself still
-    runs — it's cheap disk I/O with no Guardian calls either way).
+    A lock serializes steps 1-2 so concurrent requests can't each
+    redundantly scan the same new/changed entry. Guardian is never touched
+    when guardrails are disabled (the reload still runs; it's cheap disk
+    I/O).
 
     Args:
         config: The ``AgentConfig`` singleton to reload and rescan.
 
     Returns:
-        Dict with ``subagents_excluded`` / ``skills_excluded`` name lists
-        (empty when guardrails are disabled or nothing new/changed was
-        found), plus ``subagent_configs`` and ``available_skills`` — the
-        exact pinned snapshot that was scanned. Callers building a graph from
-        this data (e.g. ``deep_agent/aegra/graph.py``) should use these two
-        entries directly instead of calling ``AgentConfig`` getters again, so
-        graph construction is provably built from the same content this
-        function validated, not from a second, possibly-divergent reload
-        (OFFSEC-379).
+        Dict with ``subagents_excluded``/``skills_excluded`` name lists,
+        plus ``subagent_configs``/``available_skills`` — the pinned
+        snapshot that was scanned. Callers building a graph (e.g.
+        ``graph.py``) should use these two directly instead of calling
+        ``AgentConfig`` getters again.
     """
     async with _rescan_lock:
-        # Single reload-and-fetch for both sections (see docstring point 1).
-        # Offloaded to a worker thread so the (small, but non-zero) disk I/O
-        # in AgentConfig._ensure_loaded() — reading/parsing subagent .md and
-        # SKILL.md files — doesn't block the event loop for other in-flight
-        # requests. Serialized by _rescan_lock: AgentConfig's reload isn't
-        # designed for concurrent mutation from multiple threads at once.
+        # Single reload-and-fetch for both sections (see docstring point 1),
+        # offloaded to a worker thread so the disk I/O doesn't block the
+        # event loop. Serialized by _rescan_lock since AgentConfig's reload
+        # isn't safe for concurrent mutation.
         subagent_configs, available_skills = await asyncio.to_thread(
             config.get_catalogue_snapshot
         )
@@ -438,36 +353,19 @@ async def ensure_catalogue_safety_scanned(
         subagents_excluded = await _scan_subagents(config, subagent_configs)
         skills_excluded = await _scan_skills(config, available_skills)
 
-        # exclude_subagent()/exclude_skill() (called by the scans above for
-        # anything newly flagged) each call AgentConfig._ensure_loaded()
-        # internally, which — under CONFIG_AUTO_RELOAD — reassigns
-        # AgentConfig's internal dicts to brand-new objects rather than
-        # mutating the ones captured in subagent_configs/available_skills
-        # above. So a name excluded *during this same scan* would otherwise
-        # still be present in the snapshot we're about to return, even
-        # though AgentConfig itself no longer has it. Strip it explicitly —
-        # this is the actual correctness guarantee for what gets returned/
-        # used for graph construction, independent of whatever aliasing
-        # AgentConfig's own reload happens to produce (OFFSEC-379).
+        # exclude_subagent()/exclude_skill() each trigger their own
+        # AgentConfig._ensure_loaded() reload, which reassigns AgentConfig's
+        # internal dicts rather than mutating the snapshot captured above.
+        # Strip newly-excluded names explicitly so the returned snapshot
+        # doesn't still contain something AgentConfig itself just excluded.
         for name in subagents_excluded:
             subagent_configs.pop(name, None)
         for name in skills_excluded:
             skill_path = available_skills.pop(name, None)
-            # AgentConfig.exclude_skill() scrubs this path from the
-            # *orchestrator* config and from whatever `self._subagents`
-            # happens to be at the moment it runs (via _scrub_skill_path) —
-            # but that's AgentConfig's own live state, not necessarily the
-            # `subagent_configs` dict pinned above. Each subagent's
-            # `skill_paths` was already resolved (baked in) eagerly at
-            # config-load time by AgentConfig._load_all_subagents, and
-            # load_subagents() (deep_agent/src/infrastructure/subagents.py)
-            # reads that pre-baked list directly rather than re-resolving it
-            # from `available_skills` per subagent. Without this, an
-            # excluded skill's directory path would still reach the
-            # subagent skill loader through this pinned snapshot even
-            # though `available_skills` above no longer lists it — a
-            # prompt-injection distribution path CodeRabbit flagged as CWE-74
-            # (OFFSEC-379). Scrub it from every pinned subagent config too.
+            # exclude_skill() only scrubs AgentConfig's own live state, not
+            # the subagent_configs snapshot pinned above (whose
+            # skill_paths were already baked in at config-load time) —
+            # scrub it here too (CWE-74; see docstring point 3).
             if skill_path is not None:
                 excluded_path = str(skill_path)
                 for subagent_cfg in subagent_configs.values():

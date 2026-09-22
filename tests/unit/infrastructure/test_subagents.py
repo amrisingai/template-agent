@@ -34,14 +34,11 @@ class TestLoadSubagents:
             assert result is None
 
     def test_load_subagents_uses_provided_snapshot_without_calling_getter(self):
-        """Regression for OFFSEC-379 CodeRabbit finding 3 (PR #355): when a
-        pinned subagent_configs snapshot is passed in (e.g. the exact dict
-        catalogue_safety.ensure_catalogue_safety_scanned just scanned),
-        load_subagents() must build from that snapshot as-is and must NOT
-        call agent_config.get_all_subagent_configs() itself — that call
-        would trigger AgentConfig's own independent reload-from-disk under
-        CONFIG_AUTO_RELOAD and could return different (unscanned) content
-        than what was pinned (a TOCTOU gap).
+        """When a pinned subagent_configs snapshot is passed in,
+        load_subagents() must build from it as-is and must NOT call
+        agent_config.get_all_subagent_configs() itself, which would trigger
+        its own independent reload and could return different content
+        (a TOCTOU gap).
         """
         with (
             patch(

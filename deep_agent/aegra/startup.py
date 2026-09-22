@@ -449,7 +449,7 @@ async def _validate_catalogue_safety() -> str:
     """Scan catalogue-sourced subagent/skill metadata for injection/unsafe content.
 
     Must run after ``_setup_telemetry()`` so Guardian is initialised first
-    (when enabled). No-op when guardrails are disabled — see OFFSEC-379.
+    (when enabled). No-op when guardrails are disabled.
     """
     try:
         from deep_agent.src.agent.config import agent_config

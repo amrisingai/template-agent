@@ -375,7 +375,7 @@ Test prompt.
 
 
 class TestCatalogueExclusion:
-    """Tests for AgentConfig.exclude_subagent / exclude_skill (OFFSEC-379)."""
+    """Tests for AgentConfig.exclude_subagent / exclude_skill."""
 
     def setup_method(self):
         """Reset the singleton before each test."""
@@ -483,10 +483,10 @@ Researcher prompt.
     def test_exclusions_survive_config_auto_reload(self, tmp_path):
         """CONFIG_AUTO_RELOAD (default True) must not resurrect excluded items.
 
-        Regression test for OFFSEC-379: _ensure_loaded() reloads everything
-        from disk on every access when CONFIG_AUTO_RELOAD is set, which would
-        otherwise silently undo exclude_subagent/exclude_skill on the very
-        next getter call.
+        Regression test: _ensure_loaded() reloads everything from disk on
+        every access when CONFIG_AUTO_RELOAD is set, which would otherwise
+        silently undo exclude_subagent/exclude_skill on the very next getter
+        call.
         """
         config_dir = self._make_config_dir(tmp_path)
         cfg = AgentConfig(config_dir)
@@ -514,8 +514,8 @@ Researcher prompt.
 
 
 class TestGetCatalogueSnapshot:
-    """Tests for AgentConfig.get_catalogue_snapshot (OFFSEC-379 CodeRabbit
-    findings 2 & 3 on PR #355: single reload + TOCTOU-safe snapshot pinning).
+    """Tests for AgentConfig.get_catalogue_snapshot (single reload +
+    TOCTOU-safe snapshot pinning).
     """
 
     def setup_method(self):
@@ -551,10 +551,10 @@ class TestGetCatalogueSnapshot:
         assert set(available_skills) == {"safe-skill"}
 
     def test_reloads_at_most_once_per_call(self, tmp_path):
-        """The single biggest point of finding 2: get_all_subagent_configs()
-        + get_available_skills() called separately each trigger their own
-        full reload-from-disk under CONFIG_AUTO_RELOAD. get_catalogue_snapshot()
-        must reload at most once for both sections combined.
+        """get_all_subagent_configs() + get_available_skills() called
+        separately each trigger their own reload-from-disk under
+        CONFIG_AUTO_RELOAD. get_catalogue_snapshot() must reload at most
+        once for both combined.
         """
         cfg = AgentConfig(self._make_config_dir(tmp_path))
         # Prime the initial (non-reload) load.
@@ -572,16 +572,13 @@ class TestGetCatalogueSnapshot:
     def test_exclude_after_snapshot_does_not_reliably_mutate_the_snapshot(
         self, tmp_path
     ):
-        """exclude_subagent/exclude_skill call _ensure_loaded() internally,
-        which — under the default CONFIG_AUTO_RELOAD=True — reassigns
-        AgentConfig's internal dicts to *new* objects before popping from
-        them. So excluding something after a snapshot was already captured
-        does NOT reliably mutate that snapshot in place; a caller that needs
-        the snapshot itself to reflect an exclusion decided from scanning it
-        must strip the name explicitly (see
-        catalogue_safety.ensure_catalogue_safety_scanned, which does this).
-        This test documents that behavior so it isn't silently assumed
-        elsewhere.
+        """Under the default CONFIG_AUTO_RELOAD=True, exclude_subagent/
+        exclude_skill reassign AgentConfig's internal dicts to *new*
+        objects before popping, so excluding something after a snapshot
+        was captured does NOT reliably mutate that snapshot in place. A
+        caller that needs the snapshot to reflect the exclusion must strip
+        the name explicitly (see
+        catalogue_safety.ensure_catalogue_safety_scanned).
         """
         cfg = AgentConfig(self._make_config_dir(tmp_path))
 
@@ -605,7 +602,7 @@ class TestGetCatalogueSnapshot:
         assert "safe-skill" in available_skills
 
     def test_snapshot_is_pinned_against_a_later_independent_reload(self, tmp_path):
-        """The core OFFSEC-379 TOCTOU fix: a snapshot captured by one call
+        """The core TOCTOU fix: a snapshot captured by one call
         must remain exactly as captured even after a *later*, separate
         reload-from-disk replaces AgentConfig's internal dicts with new
         objects (e.g. from an unrelated getter call elsewhere in the same
@@ -638,7 +635,7 @@ class TestGetCatalogueSnapshot:
 
 
 class TestCatalogueScanFingerprints:
-    """Tests for AgentConfig's per-name content fingerprint store (OFFSEC-379).
+    """Tests for AgentConfig's per-name content fingerprint store.
 
     These back the incremental rescan in catalogue_safety.py — see
     tests/unit/agent/config/test_catalogue_safety.py for the scan-level

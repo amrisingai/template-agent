@@ -160,10 +160,9 @@ class AgentConfig:
         self._excluded_skills: set[str] = set()
         # Content fingerprints (see catalogue_safety._content_fingerprint) of
         # the last successfully-scanned-safe version of each subagent/skill,
-        # keyed by name. Sticky for the process lifetime so a rescan after a
-        # CONFIG_AUTO_RELOAD reload can tell unchanged content (skip
-        # Guardian) apart from new/modified content (must be rescanned) —
-        # see catalogue_safety.ensure_catalogue_safety_scanned (OFFSEC-379).
+        # keyed by name. Sticky for the process lifetime so a rescan can
+        # tell unchanged content (skip Guardian) from new/modified content
+        # (must rescan) — see catalogue_safety.ensure_catalogue_safety_scanned.
         self._subagent_scan_fingerprints: dict[str, str] = {}
         self._skill_scan_fingerprints: dict[str, str] = {}
 
@@ -323,7 +322,7 @@ class AgentConfig:
 
         # Re-apply any exclusions from a prior catalogue safety scan — a
         # reload from disk (CONFIG_AUTO_RELOAD) must not silently resurrect
-        # a subagent/skill previously flagged unsafe (OFFSEC-379).
+        # a subagent/skill previously flagged unsafe.
         self._reapply_exclusions()
 
         self._configs_loaded = True
@@ -656,34 +655,23 @@ class AgentConfig:
     ) -> tuple[dict[str, dict[str, Any]], dict[str, Path]]:
         """Reload-if-due once and return subagent configs + available skills together.
 
-        ``get_all_subagent_configs()`` and ``get_available_skills()`` each call
-        ``_ensure_loaded()`` independently, and ``_ensure_loaded()`` performs a
-        full reload-from-disk on *every* call when ``CONFIG_AUTO_RELOAD`` is
-        set — so fetching both sections via two separate getter calls costs two
-        redundant reloads instead of one. Calling this method once instead
-        guarantees exactly one reload for both sections combined, and — because
-        both dicts come from that same reload — hands back a mutually
-        consistent pair: safe to scan (see
-        ``catalogue_safety.ensure_catalogue_safety_scanned``) and then reuse
-        for graph construction without an intervening, possibly-divergent
-        reload picking up different on-disk content in between (OFFSEC-379).
+        Fetching both sections via separate getters would each call
+        ``_ensure_loaded()`` independently, costing two reloads instead of
+        one under ``CONFIG_AUTO_RELOAD``. Calling this once guarantees
+        exactly one reload, and returns a mutually consistent pair from
+        that same reload.
 
         Returns:
             ``(subagent_configs, available_skills)`` — the live internal
-            dicts at the moment of this call (not copies). A caller holding
-            this snapshot is unaffected by any *later*, separate reload
-            (which reassigns ``self._subagents``/``self._available_skills``
-            to new dict objects rather than mutating these ones) — that is
-            the main property callers should rely on. Note that
-            ``exclude_subagent``/``exclude_skill`` themselves call
-            ``_ensure_loaded()`` first, so under ``CONFIG_AUTO_RELOAD`` a
-            call to either *after* this snapshot was taken will itself
-            trigger a fresh reload and mutate whatever the *new*
-            ``self._subagents``/``self._available_skills`` objects are, not
-            necessarily these ones — callers that need this snapshot to
-            reflect exclusions decided from scanning it (see
-            ``catalogue_safety.ensure_catalogue_safety_scanned``) must strip
-            those names from it explicitly rather than relying on aliasing.
+            dicts at the moment of this call, not copies. A *later*,
+            separate reload reassigns ``self._subagents``/
+            ``self._available_skills`` to new dict objects rather than
+            mutating these, so this snapshot is unaffected by it. Note
+            that ``exclude_subagent``/``exclude_skill`` also trigger a
+            reload internally, so callers that need this snapshot to
+            reflect exclusions decided from scanning it must strip those
+            names from it explicitly (see
+            ``catalogue_safety.ensure_catalogue_safety_scanned``).
         """
         self._ensure_loaded()
         return self._subagents, self._available_skills
@@ -716,7 +704,7 @@ class AgentConfig:
         removed = self._subagents.pop(name, None) is not None
         # Drop any previously-recorded "scanned safe" fingerprint — if this
         # name is ever seen again its content must be treated as unverified,
-        # not silently matched against a stale fingerprint (OFFSEC-379).
+        # not silently matched against a stale fingerprint.
         self._subagent_scan_fingerprints.pop(name, None)
         if removed:
             logger.warning(
@@ -812,8 +800,8 @@ class AgentConfig:
 
         ``_ensure_loaded`` reloads everything from disk whenever
         ``CONFIG_AUTO_RELOAD`` is set, which would otherwise silently
-        resurrect anything the catalogue safety scan previously excluded
-        (OFFSEC-379). Called at the end of ``_ensure_loaded``.
+        resurrect anything the catalogue safety scan previously excluded.
+        Called at the end of ``_ensure_loaded``.
         """
         for name in self._excluded_subagents:
             self._subagents.pop(name, None)

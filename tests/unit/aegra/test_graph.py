@@ -530,10 +530,10 @@ class TestGraphHelpers:
         assert fp_resources_order == fp_resources_order_rev
 
     def test_graph_fingerprint_includes_catalogue_state(self):
-        """OFFSEC-379 (CodeRabbit finding 1 on PR #355): the cache key must
-        change when the set of available subagents/skills changes, even if
-        model/prompt/tools/hitl/mcp/resources are all identical — otherwise a
-        catalogue-safety exclusion wouldn't invalidate a stale cache entry.
+        """The cache key must change when available subagents/skills change,
+        even if everything else (model/prompt/tools/hitl/mcp/resources) is
+        identical — otherwise a catalogue-safety exclusion wouldn't
+        invalidate a stale cache entry.
         """
         from deep_agent.aegra.graph import _graph_fingerprint
 
@@ -1050,18 +1050,12 @@ class TestGuardianActivationGate:
 
 
 class TestGraphCacheInvalidationOnCatalogueExclusion:
-    """Regression tests for OFFSEC-379 CodeRabbit finding 1 (PR #355).
+    """Regression tests for graph cache invalidation on catalogue exclusion.
 
-    ``_graph_cache``'s key previously only depended on
-    model/prompt/tool-names/hitl/mcp/resources — none of which change when
-    ``ensure_catalogue_safety_scanned`` excludes a subagent or skill. A stale
-    cache entry built while that subagent/skill was still present would
-    therefore keep being served (and, for skills specifically, would keep
-    exposing the excluded skill via ``SkillsMiddleware``'s frozen
-    ``sources`` list — see ``_graph_fingerprint``'s docstring). These tests
-    prove a request observing a smaller catalogue snapshot than a previous
-    request (same model/prompt/tools otherwise) always rebuilds instead of
-    reusing the earlier cache entry.
+    ``_graph_cache``'s key previously ignored subagent/skill availability, so
+    a stale entry could keep serving excluded content. These tests confirm a
+    smaller catalogue snapshot (same model/prompt/tools otherwise) always
+    triggers a rebuild instead of a cache hit.
     """
 
     @staticmethod

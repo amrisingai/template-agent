@@ -134,66 +134,30 @@ for memory in repo.list_all_memories():
 
 ---
 
-### 4. Subagent/skill metadata not validated at config load — Addressed (OFFSEC-379)
-**Threat:** A tampered, malicious, or compromised subagent/skill catalogue entry
-could inject instructions into a subagent's system prompt, delegation
-description, or skill body at startup, *or* be introduced/modified later and
-picked up by a `CONFIG_AUTO_RELOAD` reload. Because subagents and skills are
-resolved from the shared package catalogue, this content may be authored by a
-different user or org than the one deploying the agent — making the catalogue
-a cross-tenant prompt-injection distribution channel (DI 06).
+### 4. Subagent/skill metadata not validated at config load — Addressed
+**Threat:** A tampered or compromised subagent/skill catalogue entry could
+inject instructions into a subagent's system prompt or skill body at
+startup, or be introduced/modified later and picked up by a
+`CONFIG_AUTO_RELOAD` reload. Catalogue content may be authored by a
+different org than the one deploying the agent, making it a cross-tenant
+prompt-injection distribution channel.
 
-**Mitigation in place:**
-- `scan_catalogue_safety()` (`deep_agent/src/agent/config/catalogue_safety.py`)
-  runs once at startup, after Guardian is initialised (`run_startup()` →
-  `_validate_catalogue_safety()`), scanning every subagent's `description` +
-  `body` and every skill's `SKILL.md` `description` + `body` with the
-  existing `check_safety` + `check_injection` Guardian checks.
-- `ensure_catalogue_safety_scanned()` closes the hot-reload gap: it is
-  awaited early in `deep_agent/aegra/graph.py`'s `agent()` graph factory,
-  which Aegra invokes per-request (verified against `aegra_api`'s
-  `invoke_factory()` — the factory is called fresh on every
-  `threads.create_run`, it is not cached/memoized at the Aegra layer; the
-  module's own `_graph_cache` is a separate, orchestrator-config-keyed
-  optimization that does not gate this call). It triggers `AgentConfig`'s
-  normal reload-from-disk and then rescans **only** subagents/skills whose
-  content fingerprint (SHA-256 of `description`+`body`/`SKILL.md`, via
-  `_content_fingerprint`) is new or has changed since the last successful
-  scan of that name — unchanged entries never call Guardian. This bounds the
-  added cost to genuinely new/modified catalogue content instead of firing
-  2xN Guardian calls on every request under the default
-  `CONFIG_AUTO_RELOAD=true`.
-- Either path excludes a flagged subagent/skill from the running agent
-  (`AgentConfig.exclude_subagent` / `exclude_skill`, which also scrubs the
-  skill's path out of any already-resolved `skill_paths`) — sticky for the
-  process lifetime via `AgentConfig._reapply_exclusions`, and the rest of the
-  agent still starts and runs normally.
+**Mitigation in place:** `scan_catalogue_safety()`
+(`deep_agent/src/agent/config/catalogue_safety.py`) runs the existing
+`check_safety`/`check_injection` Guardian checks over every subagent's and
+skill's description+body once at startup. `ensure_catalogue_safety_scanned()`
+closes the hot-reload gap by rescanning on every request (awaited in
+`graph.py`'s `agent()` factory), but only content whose fingerprint has
+changed since the last scan, so unchanged entries never re-hit Guardian.
+Either path excludes a flagged subagent/skill from the running agent
+(`AgentConfig.exclude_subagent`/`exclude_skill`) — sticky for the process
+lifetime — while the rest of the agent keeps running normally.
 
-**Residual gaps:**
-- **Detection window, not real-time:** a subagent/skill added or modified on
-  disk is only rescanned the next time `ensure_catalogue_safety_scanned()`
-  runs — i.e. the next request that builds/rebuilds a graph. A malicious edit
-  could theoretically be read into an in-flight request's `AgentConfig` state
-  a few instructions before the rescan call if something bypasses the
-  `agent()` factory path entirely; every current call site goes through it.
-- **Fingerprint scope:** the fingerprint covers `description`+`body` (the
-  same fields Guardian scans) — a change to other frontmatter fields (e.g.
-  `tools`, `mcps`, `model`) alone will not trigger a rescan of that entry.
-  Guardian itself was never scanning those fields, so this preserves prior
-  scope; it does not silently narrow it.
-- **In-process only:** fingerprints and exclusions live in the `AgentConfig`
-  singleton's memory and reset on process restart — this is correct (a fresh
-  process should treat everything as new, per `scan_catalogue_safety`'s
-  startup semantics) but means no cross-pod/cross-replica sharing; each pod
-  independently rescans content new to it.
-- No-op when Guardian is disabled (`GUARDIAN_API_BASE` unset or
-  `guardrail.enabled: false`) — same fail-open posture as every other Guardian
-  check in this register.
-- Registry-side (publish-time) scanning is still absent — malicious catalogue
-  content is only caught when a consuming agent starts up or rebuilds its
-  graph, not blocked from being published in the first place. The registry
-  has no Guardian wiring today; adding it is a separate, larger effort
-  tracked outside this fix.
+**Residual gap:** Detection is per-request, not real-time — a malicious edit
+is only caught on the next graph rebuild. Registry-side (publish-time)
+scanning is still absent, so malicious content is caught when a consuming
+agent starts up or rebuilds its graph, not blocked from being published in
+the first place.
 
 ---
 
