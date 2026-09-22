@@ -3,7 +3,7 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
 
 from deep_agent.aegra.safety import (
     SafetyAwareRunnable,
@@ -18,6 +18,11 @@ from deep_agent.src.guardrails import (
 from deep_agent.src.guardrails import TOOL_SAFETY_REFUSAL as _TOOL_SAFETY_REFUSAL
 
 _INPUT_SAFETY_REFUSAL = "I can't help with that request due to content safety policy."
+
+# A repeated unit long/frequent enough to trip the default
+# REPETITION_LOOP_MIN_UNIT_LEN=20 / REPETITION_LOOP_MIN_REPEATS=4 thresholds.
+_REPEATED_UNIT = "I cannot verify that claim. "
+_REPEATED_TEXT = _REPEATED_UNIT * 6
 
 
 # ---------------------------------------------------------------------------
@@ -241,6 +246,73 @@ class TestSafetyAwareRunnableAinvoke:
 
 
 # ---------------------------------------------------------------------------
+# SafetyAwareRunnable.ainvoke — repetition loop detection (OFFSEC-380)
+# ---------------------------------------------------------------------------
+
+
+class TestSafetyAwareRunnableAinvokeRepetition:
+    @pytest.mark.asyncio
+    async def test_repetition_loop_truncates_final_ai_message(self):
+        ai = AIMessage(content="Sure, here is the answer. " + _REPEATED_TEXT)
+        inner = MagicMock()
+        inner.ainvoke = AsyncMock(return_value={"messages": [ai]})
+        sar = SafetyAwareRunnable(inner)
+        out = await sar.ainvoke({})
+        last_ai = out["messages"][-1]
+        assert isinstance(last_ai, AIMessage)
+        assert len(last_ai.content) < len(ai.content)
+        assert last_ai.content.count(_REPEATED_UNIT.strip()) == 1
+
+    @pytest.mark.asyncio
+    async def test_non_looping_response_passes_through_unchanged(self):
+        ai = AIMessage(content="A perfectly normal, non-repetitive answer.")
+        inner = MagicMock()
+        inner.ainvoke = AsyncMock(return_value={"messages": [ai]})
+        sar = SafetyAwareRunnable(inner)
+        out = await sar.ainvoke({})
+        assert out["messages"][-1].content == ai.content
+
+    @pytest.mark.asyncio
+    async def test_tool_block_takes_priority_over_repetition_check(self):
+        ai = AIMessage(content=_REPEATED_TEXT)
+        tm = ToolMessage(content="tool output", name="t", tool_call_id="c1")
+
+        async def fake_ainvoke(input, config, **kwargs):
+            config["_safety_ctx"]["blocked"] = True
+            return {"messages": [tm, ai]}
+
+        inner = MagicMock()
+        inner.ainvoke = fake_ainvoke
+        sar = SafetyAwareRunnable(inner)
+        out = await sar.ainvoke({})
+        last_ai = next(m for m in reversed(out["messages"]) if isinstance(m, AIMessage))
+        assert last_ai.content == _TOOL_SAFETY_REFUSAL
+
+    @pytest.mark.asyncio
+    async def test_repetition_check_disabled_via_settings(self):
+        ai = AIMessage(content=_REPEATED_TEXT)
+        inner = MagicMock()
+        inner.ainvoke = AsyncMock(return_value={"messages": [ai]})
+        sar = SafetyAwareRunnable(inner)
+        with patch(
+            "deep_agent.aegra.safety.settings.REPETITION_LOOP_DETECTION_ENABLED",
+            False,
+        ):
+            out = await sar.ainvoke({})
+        assert out["messages"][-1].content == _REPEATED_TEXT
+
+    @pytest.mark.asyncio
+    async def test_repetition_check_runs_on_non_outermost_too(self):
+        """Runs at every level, mirroring the tool-block override behavior."""
+        ai = AIMessage(content=_REPEATED_TEXT)
+        inner = MagicMock()
+        inner.ainvoke = AsyncMock(return_value={"messages": [ai]})
+        sar = SafetyAwareRunnable(inner, outermost=False)
+        out = await sar.ainvoke({})
+        assert len(out["messages"][-1].content) < len(_REPEATED_TEXT)
+
+
+# ---------------------------------------------------------------------------
 # SafetyAwareRunnable.astream
 # ---------------------------------------------------------------------------
 
@@ -306,6 +378,69 @@ class TestSafetyAwareRunnableAstream:
         sar = SafetyAwareRunnable(inner, outermost=True)
         with pytest.raises(RuntimeError, match="crash"):
             await _collect(sar.astream({}))
+
+
+# ---------------------------------------------------------------------------
+# SafetyAwareRunnable.astream — repetition loop detection (OFFSEC-380)
+# ---------------------------------------------------------------------------
+
+
+class TestSafetyAwareRunnableAstreamRepetition:
+    @pytest.mark.asyncio
+    async def test_repetition_loop_truncates_and_stops_stream(self):
+        # Split the repeated text into several "messages"-mode chunks, as a
+        # real streaming model call would.
+        parts = [_REPEATED_UNIT] * 6
+
+        async def gen(*a, **kw):
+            for part in parts:
+                yield ("messages", (AIMessageChunk(content=part), {}))
+            # Should never be reached — the proxy stops after detecting the loop.
+            yield ("messages", (AIMessageChunk(content="should not appear"), {}))
+
+        inner = MagicMock()
+        inner.astream = gen
+        sar = SafetyAwareRunnable(inner, outermost=True)
+        result = await _collect(sar.astream({}))
+
+        assert "should not appear" not in "".join(
+            str(r[1][0].content) for r in result if isinstance(r, tuple)
+        )
+        last_event_type, (last_msg, _) = result[-1]
+        assert last_event_type == "messages"
+        assert last_msg.content.count(_REPEATED_UNIT.strip()) == 1
+
+    @pytest.mark.asyncio
+    async def test_non_looping_messages_mode_chunks_pass_through(self):
+        chunks = [
+            ("messages", (AIMessageChunk(content="Hello "), {})),
+            ("messages", (AIMessageChunk(content="world."), {})),
+        ]
+
+        async def gen(*a, **kw):
+            for c in chunks:
+                yield c
+
+        inner = MagicMock()
+        inner.astream = gen
+        sar = SafetyAwareRunnable(inner, outermost=True)
+        result = await _collect(sar.astream({}))
+        assert result == chunks
+
+    @pytest.mark.asyncio
+    async def test_non_outermost_does_not_check_repetition(self):
+        parts = [_REPEATED_UNIT] * 6
+
+        async def gen(*a, **kw):
+            for part in parts:
+                yield ("messages", (AIMessageChunk(content=part), {}))
+
+        inner = MagicMock()
+        inner.astream = gen
+        sar = SafetyAwareRunnable(inner, outermost=False)
+        result = await _collect(sar.astream({}))
+        # All chunks pass through unmodified — no truncation at non-outermost level.
+        assert len(result) == len(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -424,3 +559,123 @@ class TestSafetyAwareRunnableAstreamEvents:
         refusal_events = [e for e in result if e.get("name") == "guardian_refusal"]
         assert len(refusal_events) == 1
         assert chunk_event not in result
+
+
+# ---------------------------------------------------------------------------
+# SafetyAwareRunnable.astream_events — repetition loop detection (OFFSEC-380)
+# ---------------------------------------------------------------------------
+
+
+class TestSafetyAwareRunnableAstreamEventsRepetition:
+    @pytest.mark.asyncio
+    async def test_repetition_loop_breaks_stream_and_emits_truncated_chunk(self):
+        parts = [_REPEATED_UNIT] * 6
+
+        async def gen(*a, **kw):
+            for part in parts:
+                yield {
+                    "event": "on_chat_model_stream",
+                    "data": {"chunk": AIMessageChunk(content=part)},
+                }
+            # Should never be reached — the proxy breaks out before this.
+            yield {
+                "event": "on_chat_model_stream",
+                "data": {"chunk": AIMessageChunk(content="should not appear")},
+            }
+
+        inner = MagicMock()
+        inner.astream_events = gen
+        sar = SafetyAwareRunnable(inner, outermost=True)
+        result = await _collect(sar.astream_events({}))
+
+        truncated_events = [
+            e for e in result if e.get("name") == "repetition_loop_truncated"
+        ]
+        assert len(truncated_events) == 1
+        chunk = truncated_events[0]["data"]["chunk"]
+        assert isinstance(chunk, AIMessage)
+        assert chunk.content.count(_REPEATED_UNIT.strip()) == 1
+        assert "should not appear" not in chunk.content
+        # No guardian refusal — this is a repetition-loop event, not a safety block.
+        assert not any(e.get("name") == "guardian_refusal" for e in result)
+
+    @pytest.mark.asyncio
+    async def test_non_looping_ai_chunks_flushed_unchanged(self):
+        events = [
+            {
+                "event": "on_chat_model_stream",
+                "data": {"chunk": AIMessageChunk(content="Hello ")},
+            },
+            {
+                "event": "on_chat_model_stream",
+                "data": {"chunk": AIMessageChunk(content="world.")},
+            },
+        ]
+
+        async def gen(*a, **kw):
+            for e in events:
+                yield e
+
+        inner = MagicMock()
+        inner.astream_events = gen
+        sar = SafetyAwareRunnable(inner, outermost=True)
+        result = await _collect(sar.astream_events({}))
+        assert result == events
+
+    @pytest.mark.asyncio
+    async def test_safety_block_takes_priority_over_repetition(self):
+        async def gen(*a, **kw):
+            config = a[1] if len(a) > 1 else kw.get("config", {})
+            config["_safety_ctx"]["blocked"] = True
+            for part in [_REPEATED_UNIT] * 6:
+                yield {
+                    "event": "on_chat_model_stream",
+                    "data": {"chunk": AIMessageChunk(content=part)},
+                }
+
+        inner = MagicMock()
+        inner.astream_events = gen
+        sar = SafetyAwareRunnable(inner, outermost=True)
+        result = await _collect(sar.astream_events({}))
+        assert any(e.get("name") == "guardian_refusal" for e in result)
+        assert not any(e.get("name") == "repetition_loop_truncated" for e in result)
+
+    @pytest.mark.asyncio
+    async def test_repetition_check_disabled_via_settings(self):
+        parts = [_REPEATED_UNIT] * 6
+
+        async def gen(*a, **kw):
+            for part in parts:
+                yield {
+                    "event": "on_chat_model_stream",
+                    "data": {"chunk": AIMessageChunk(content=part)},
+                }
+
+        inner = MagicMock()
+        inner.astream_events = gen
+        sar = SafetyAwareRunnable(inner, outermost=True)
+        with patch(
+            "deep_agent.aegra.safety.settings.REPETITION_LOOP_DETECTION_ENABLED",
+            False,
+        ):
+            result = await _collect(sar.astream_events({}))
+        assert not any(e.get("name") == "repetition_loop_truncated" for e in result)
+        assert len(result) == len(parts)
+
+    @pytest.mark.asyncio
+    async def test_non_outermost_does_not_check_repetition(self):
+        parts = [_REPEATED_UNIT] * 6
+
+        async def gen(*a, **kw):
+            for part in parts:
+                yield {
+                    "event": "on_chat_model_stream",
+                    "data": {"chunk": AIMessageChunk(content=part)},
+                }
+
+        inner = MagicMock()
+        inner.astream_events = gen
+        sar = SafetyAwareRunnable(inner, outermost=False)
+        result = await _collect(sar.astream_events({}))
+        # All chunks pass through unmodified — no truncation at non-outermost level.
+        assert len(result) == len(parts)
