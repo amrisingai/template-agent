@@ -311,6 +311,31 @@ class TestSafetyAwareRunnableAinvokeRepetition:
         out = await sar.ainvoke({})
         assert len(out["messages"][-1].content) < len(_REPEATED_TEXT)
 
+    @pytest.mark.asyncio
+    async def test_truncation_preserves_message_identity_and_metadata(self):
+        """model_copy() must keep id/tool_calls/response_metadata/usage_metadata
+        intact — only `content` should change."""
+        ai = AIMessage(
+            content=_REPEATED_TEXT,
+            id="run-123",
+            tool_calls=[
+                {"name": "lookup", "args": {"q": "x"}, "id": "call-1"},
+            ],
+            response_metadata={"model": "gemini-2-5-pro", "finish_reason": "stop"},
+            usage_metadata={"input_tokens": 10, "output_tokens": 500, "total_tokens": 510},
+        )
+        inner = MagicMock()
+        inner.ainvoke = AsyncMock(return_value={"messages": [ai]})
+        sar = SafetyAwareRunnable(inner)
+        out = await sar.ainvoke({})
+        last_ai = out["messages"][-1]
+        assert last_ai is not ai  # a copy, not a mutation
+        assert len(last_ai.content) < len(ai.content)
+        assert last_ai.id == "run-123"
+        assert last_ai.tool_calls == ai.tool_calls
+        assert last_ai.response_metadata == ai.response_metadata
+        assert last_ai.usage_metadata == ai.usage_metadata
+
 
 # ---------------------------------------------------------------------------
 # SafetyAwareRunnable.astream
@@ -406,9 +431,82 @@ class TestSafetyAwareRunnableAstreamRepetition:
         assert "should not appear" not in "".join(
             str(r[1][0].content) for r in result if isinstance(r, tuple)
         )
+        # Chunks are buffered per-invocation, not forwarded live: none of the
+        # individual repeats leak out ahead of the truncation decision, so
+        # exactly one ("messages", ...) event — the truncated one — is ever
+        # yielded, and its content contains exactly one copy of the unit.
+        assert len(result) == 1
         last_event_type, (last_msg, _) = result[-1]
         assert last_event_type == "messages"
         assert last_msg.content.count(_REPEATED_UNIT.strip()) == 1
+        combined = "".join(str(r[1][0].content) for r in result)
+        assert combined.count(_REPEATED_UNIT.strip()) == 1
+
+    @pytest.mark.asyncio
+    async def test_repetition_buffer_scoped_per_model_invocation(self):
+        """A short, non-repetitive first invocation must be flushed through
+        unmodified once a second invocation (different run_id) starts, and
+        the second invocation's loop must be detected using only its own
+        text — mirroring the run_id-partitioning used in astream_events."""
+
+        async def gen(*a, **kw):
+            yield (
+                "messages",
+                (AIMessageChunk(content="Sure, one moment."), {"run_id": "run-1"}),
+            )
+            for part in [_REPEATED_UNIT] * 6:
+                yield ("messages", (AIMessageChunk(content=part), {"run_id": "run-2"}))
+
+        inner = MagicMock()
+        inner.astream = gen
+        sar = SafetyAwareRunnable(inner, outermost=True)
+        result = await _collect(sar.astream({}))
+
+        # First invocation's chunk flushed unchanged at the run_id boundary.
+        first_type, (first_msg, first_meta) = result[0]
+        assert first_type == "messages"
+        assert first_msg.content == "Sure, one moment."
+        assert first_meta == {"run_id": "run-1"}
+
+        # Second invocation's loop truncated to a single copy of the unit.
+        last_type, (last_msg, _) = result[-1]
+        assert last_type == "messages"
+        assert last_msg.content.count(_REPEATED_UNIT.strip()) == 1
+
+    @pytest.mark.asyncio
+    async def test_repetition_text_does_not_leak_across_invocations(self):
+        """A prior invocation's near-threshold trailing text must not combine
+        with an unrelated later invocation's text to produce a false-positive
+        loop — each is a distinct model call, not one continuous generation."""
+
+        async def gen(*a, **kw):
+            # First invocation: 3 copies of the unit (below MIN_REPEATS=4) —
+            # not a loop on its own.
+            yield (
+                "messages",
+                (
+                    AIMessageChunk(content=_REPEATED_UNIT * 3),
+                    {"run_id": "run-1"},
+                ),
+            )
+            # Second, unrelated invocation happens to start with one copy of
+            # the same phrase — genuinely not a loop by itself.
+            yield (
+                "messages",
+                (
+                    AIMessageChunk(content=_REPEATED_UNIT + "Anyway, the summary is X."),
+                    {"run_id": "run-2"},
+                ),
+            )
+
+        inner = MagicMock()
+        inner.astream = gen
+        sar = SafetyAwareRunnable(inner, outermost=True)
+        result = await _collect(sar.astream({}))
+
+        combined = "".join(str(r[1][0].content) for r in result if isinstance(r, tuple))
+        assert combined.count(_REPEATED_UNIT.strip()) == 4  # 3 + 1, none truncated
+        assert "Anyway, the summary is X." in combined
 
     @pytest.mark.asyncio
     async def test_non_looping_messages_mode_chunks_pass_through(self):
@@ -598,6 +696,70 @@ class TestSafetyAwareRunnableAstreamEventsRepetition:
         assert "should not appear" not in chunk.content
         # No guardian refusal — this is a repetition-loop event, not a safety block.
         assert not any(e.get("name") == "guardian_refusal" for e in result)
+
+    @pytest.mark.asyncio
+    async def test_repetition_text_does_not_leak_across_run_ids(self):
+        """A prior model invocation's near-threshold trailing text must not
+        combine with a later, unrelated invocation's text to produce a
+        false-positive loop — each on_chat_model_stream run_id is a distinct
+        model call."""
+
+        async def gen(*a, **kw):
+            # First invocation: 3 copies of the unit (below MIN_REPEATS=4).
+            yield {
+                "event": "on_chat_model_stream",
+                "run_id": "run-1",
+                "data": {"chunk": AIMessageChunk(content=_REPEATED_UNIT * 3)},
+            }
+            # Second, unrelated invocation starts with one copy of the same
+            # phrase — genuinely not a loop by itself.
+            yield {
+                "event": "on_chat_model_stream",
+                "run_id": "run-2",
+                "data": {
+                    "chunk": AIMessageChunk(
+                        content=_REPEATED_UNIT + "Anyway, the summary is X."
+                    )
+                },
+            }
+
+        inner = MagicMock()
+        inner.astream_events = gen
+        sar = SafetyAwareRunnable(inner, outermost=True)
+        result = await _collect(sar.astream_events({}))
+
+        assert not any(e.get("name") == "repetition_loop_truncated" for e in result)
+
+    @pytest.mark.asyncio
+    async def test_repetition_detected_within_single_run_id_after_boundary(self):
+        """The run_id boundary reset must not prevent detecting a genuine
+        loop that occurs entirely within a single (later) invocation."""
+
+        async def gen(*a, **kw):
+            yield {
+                "event": "on_chat_model_stream",
+                "run_id": "run-1",
+                "data": {"chunk": AIMessageChunk(content="short, unrelated reply")},
+            }
+            for part in [_REPEATED_UNIT] * 6:
+                yield {
+                    "event": "on_chat_model_stream",
+                    "run_id": "run-2",
+                    "data": {"chunk": AIMessageChunk(content=part)},
+                }
+
+        inner = MagicMock()
+        inner.astream_events = gen
+        sar = SafetyAwareRunnable(inner, outermost=True)
+        result = await _collect(sar.astream_events({}))
+
+        truncated_events = [
+            e for e in result if e.get("name") == "repetition_loop_truncated"
+        ]
+        assert len(truncated_events) == 1
+        assert truncated_events[0]["data"]["chunk"].content.count(
+            _REPEATED_UNIT.strip()
+        ) == 1
 
     @pytest.mark.asyncio
     async def test_non_looping_ai_chunks_flushed_unchanged(self):

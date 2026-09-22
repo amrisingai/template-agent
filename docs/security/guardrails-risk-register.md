@@ -232,23 +232,40 @@ that already wraps every orchestrator/subagent call:
   truncated `on_chat_model_stream` chunk instead of the buffered ones —
   stopping further generation before it consumes unbounded tokens.
 - **`astream`**: applies the same detection to `stream_mode="messages"`
-  chunks, truncating and ending the stream early.
+  chunks, buffering them per model invocation and only forwarding once that
+  invocation's outcome is known — truncating and ending the stream early if
+  a loop is found, so a client never sees any of the repeats.
 - **`ainvoke`**: runs the detector on the final `AIMessage` (post-hoc, since
   the full response has already been generated) at every nesting level —
   same rationale as the existing tool-block override — so truncated content
   never re-enters conversation state/context even for non-streaming callers.
+  Uses `model_copy(update={"content": ...})` so tool_calls, response
+  metadata, usage metadata, and the message's id survive the truncation.
 
 Gated by `REPETITION_LOOP_DETECTION_ENABLED` (default `true`); a warning log
 is emitted whenever a loop is truncated.
 
 **Residual gaps:**
-- `astream_events`/`astream` accumulate text across the *entire* graph run
-  rather than resetting per individual model call/run-id, so in principle a
-  legitimate response ending in one repeated-looking fragment immediately
-  followed by another model call's output could combine into a false
-  positive. In practice this requires an implausibly specific alignment
-  given the >= 20-char / >= 4-repeat thresholds, but tighter per-run
-  scoping (keyed by the event's `run_id`) would remove the theoretical gap.
+- `astream_events`/`astream` now scope accumulated text to a single model
+  call, keyed by the event/chunk metadata's `run_id` (reset whenever it
+  changes), instead of accumulating across the whole graph run — this closes
+  the false-positive gap previously noted here. `astream` additionally
+  buffers `stream_mode="messages"` chunks per invocation and only forwards
+  them once that invocation's outcome (loop or not) is decided, so none of a
+  detected loop's repeats reach the client ahead of the truncation.
+- `astream_events`'s replacement event (`repetition_loop_truncated`, like the
+  pre-existing `guardian_refusal` it mirrors) is emitted as a synthetic
+  `on_chat_model_stream` event. Aegra's `stream_graph_events` (v1) derives
+  `"messages"`-mode output for non-JS graphs from `on_chain_stream` chunks at
+  the root run, not from `on_chat_model_stream` — so a client consuming only
+  `stream_mode=["messages"]` (no `"events"`) is served via `astream` (which
+  already avoids this), while a client that also requests `"events"` still
+  sees the correction on the raw events channel. Re-shaping the synthetic
+  event to masquerade as a root `on_chain_stream`/`"messages"` chunk would
+  require depending on `aegra_api`'s internal wire format (e.g. its
+  `run_id` derivation from `config["configurable"]["run_id"]`), which isn't
+  a documented contract and isn't covered by this repo's tests — left as a
+  known limitation rather than risking a fragile, unverified coupling.
 - `ainvoke`'s truncation is post-hoc — it prevents truncated garbage from
   re-entering context/state and improves UX, but the tokens for the full
   (looping) generation have already been billed by the provider by the time

@@ -189,7 +189,10 @@ class SafetyAwareRunnable:
                                 len(text),
                                 len(truncated),
                             )
-                            msgs[i] = AIMessage(content=truncated, id=msgs[i].id)
+                            # model_copy preserves tool_calls, response_metadata,
+                            # usage_metadata, structured content, and the message's
+                            # existing id — only `content` is replaced.
+                            msgs[i] = msgs[i].model_copy(update={"content": truncated})
                             result = {
                                 **(result if isinstance(result, dict) else {}),
                                 "messages": msgs,
@@ -214,28 +217,68 @@ class SafetyAwareRunnable:
         unbounded. Other stream-mode shapes are passed through unmodified —
         this proxy only understands the ("messages", (message, meta)) shape
         it already uses for the safety-refusal chunk below.
+
+        Messages-mode chunks are buffered (not forwarded immediately) and
+        keyed by the chunk metadata's ``run_id`` so that: (1) repetition
+        detection is scoped to a single model invocation rather than the
+        whole graph run, and (2) none of a detected loop's repeats reach the
+        client before the truncation decision is made — the buffer is only
+        flushed once a chunk from a *different* invocation arrives, or the
+        stream ends normally.
         """
+        pending: list[Any] = []
+        pending_run_id: Any = None
         repetition_text = ""
+
+        def _flush() -> list[Any]:
+            nonlocal pending
+            flushed, pending = pending, []
+            return flushed
+
         try:
             async for chunk in self._runnable.astream(input, config, **kwargs):
-                if self._outermost and settings.REPETITION_LOOP_DETECTION_ENABLED:
-                    message = _messages_mode_content(chunk)
-                    if message is not None:
-                        repetition_text += _message_text(
-                            getattr(message, "content", "")
-                        )
-                        is_loop, truncated = detect_repetition_loop(repetition_text)
-                        if is_loop:
-                            logger.warning(
-                                "Repetition loop detected in astream; "
-                                "truncating (buffered_chars=%d)",
-                                len(repetition_text),
-                            )
-                            from langchain_core.messages import AIMessage
+                if not (self._outermost and settings.REPETITION_LOOP_DETECTION_ENABLED):
+                    yield chunk
+                    continue
 
-                            yield ("messages", (AIMessage(content=truncated), {}))
-                            return
-                yield chunk
+                message = _messages_mode_content(chunk)
+                if message is None:
+                    # Non-messages-mode chunk (e.g. "updates"/"debug"): flush
+                    # whatever's buffered first to preserve relative ordering.
+                    for buffered in _flush():
+                        yield buffered
+                    pending_run_id = None
+                    repetition_text = ""
+                    yield chunk
+                    continue
+
+                _, meta = chunk[1]
+                run_id = meta.get("run_id") if isinstance(meta, dict) else None
+                if run_id != pending_run_id:
+                    # New model invocation — flush the prior one unchanged and
+                    # start scoping detection to this invocation only.
+                    for buffered in _flush():
+                        yield buffered
+                    pending_run_id = run_id
+                    repetition_text = ""
+
+                pending.append(chunk)
+                repetition_text += _message_text(getattr(message, "content", ""))
+                is_loop, truncated = detect_repetition_loop(repetition_text)
+                if is_loop:
+                    logger.warning(
+                        "Repetition loop detected in astream; "
+                        "truncating (buffered_chars=%d)",
+                        len(repetition_text),
+                    )
+                    _flush()  # discard the buffered repeats — never sent.
+                    from langchain_core.messages import AIMessage
+
+                    yield ("messages", (AIMessage(content=truncated), {}))
+                    return
+
+            for buffered in _flush():
+                yield buffered
         except Exception as exc:
             if not self._outermost:
                 raise
@@ -263,8 +306,12 @@ class SafetyAwareRunnable:
             # OFFSEC-380: incrementally accumulated text of the AI response
             # currently being streamed, used to detect a degenerate
             # repetition loop early and break out before it consumes
-            # unbounded tokens.
+            # unbounded tokens. Scoped per model invocation (keyed by each
+            # on_chat_model_stream event's own run_id) so an unrelated later
+            # (or earlier) LLM call's text in the same graph run can't dilute
+            # detection or combine into a false positive.
             repetition_text = ""
+            repetition_run_id: Any = None
             repetition_loop_hit = False
             repetition_truncated_text = ""
             async for event in self._runnable.astream_events(
@@ -292,6 +339,10 @@ class SafetyAwareRunnable:
                 if self._outermost and event_type == "on_chat_model_stream":
                     ai_chunks.append(event)
                     if settings.REPETITION_LOOP_DETECTION_ENABLED:
+                        run_id = event.get("run_id")
+                        if run_id != repetition_run_id:
+                            repetition_run_id = run_id
+                            repetition_text = ""
                         chunk_obj = event.get("data", {}).get("chunk")
                         repetition_text += _message_text(
                             getattr(chunk_obj, "content", "")
