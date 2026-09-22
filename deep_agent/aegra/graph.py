@@ -284,7 +284,10 @@ async def agent(runtime: ServerRuntime) -> Any:
     orch_model_raw = orchestrator_cfg.get("model", "gemini-3.1-pro-preview")
     system_prompt = orchestrator_cfg.get("body", "")
     skill_paths = orchestrator_cfg.get("skill_paths", [])
-    tool_names = orchestrator_cfg.get("tools", [])
+    # No default here: a `None` (key absent) must stay distinguishable from
+    # an explicit `tools: []` for resolve_capability_manifest's fallback
+    # logic below (OFFSEC-384).
+    tool_names = orchestrator_cfg.get("tools")
     mcp_server_names = orchestrator_cfg.get("mcps", [])
 
     # Resolve the personalization user ID to match what the BFF proxy

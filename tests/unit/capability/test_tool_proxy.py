@@ -132,14 +132,31 @@ class TestCapabilityToolProxyAinvoke:
 
 
 class TestCapabilityToolProxyRun:
-    def test_allowed_tool_delegates_to_inner_invoke(self):
+    def test_allowed_structured_tool_forwards_kwargs_as_single_input_dict(self):
+        """`BaseTool.run()` delivers a structured (multi-field) tool's parsed
+        arguments to a generic `_run(*args, **kwargs)` as kwargs only, never
+        mixed with positional args. `invoke()` expects that same input back
+        as a single dict, not re-spread as separate kwargs (which would miss
+        its own required `input` argument)."""
         inner = _make_inner_tool(name="search")
         inner.invoke = MagicMock(return_value="sync result")
         proxy = CapabilityToolProxy(inner, _manifest({"search"}))
 
-        result = proxy._run("arg1", key="val")
+        result = proxy._run(query="val", limit=5)
 
-        inner.invoke.assert_called_once_with("arg1", key="val")
+        inner.invoke.assert_called_once_with({"query": "val", "limit": 5})
+        assert result == "sync result"
+
+    def test_allowed_unstructured_tool_forwards_single_positional_input(self):
+        """A single-string-arg tool delivers its value as one positional arg;
+        that must be passed through as `invoke`'s `input`, not spread."""
+        inner = _make_inner_tool(name="search")
+        inner.invoke = MagicMock(return_value="sync result")
+        proxy = CapabilityToolProxy(inner, _manifest({"search"}))
+
+        result = proxy._run("plain text input")
+
+        inner.invoke.assert_called_once_with("plain text input")
         assert result == "sync result"
 
     def test_disallowed_tool_denied_without_calling_inner(self):
