@@ -244,3 +244,42 @@ class TestScanCatalogueSafety:
         assert summary == {"subagents_excluded": [], "skills_excluded": []}
         mock_safety.assert_not_called()
         config.exclude_skill.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_skill_with_unparseable_frontmatter_is_excluded(self, tmp_path):
+        """A SKILL.md that fails to parse must fail closed, not skip the scan.
+
+        Regression for a security review finding on OFFSEC-379: unlike
+        subagents (dropped entirely on parse failure by _load_all_subagents),
+        the skill directory index (_scan_available_skills) loads skills
+        regardless of whether SKILL.md parses. A deliberately malformed
+        frontmatter around a malicious body must not bypass the scan by
+        being silently left available.
+        """
+        skill_dir = tmp_path / "broken-skill"
+        skill_dir.mkdir()
+        # Unclosed YAML flow mapping — parse_frontmatter's yaml.safe_load()
+        # raises on this.
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: broken-skill\ndescription: [unclosed\n---\n\nBody.\n"
+        )
+
+        config = _make_config_mock(skills={"broken-skill": skill_dir})
+
+        with (
+            patch(
+                "deep_agent.src.agent.config.catalogue_safety.get_guardrails_config",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "deep_agent.src.guardrails.client.check_safety", new=AsyncMock()
+            ) as mock_safety,
+        ):
+            summary = await scan_catalogue_safety(config)
+
+        assert summary["skills_excluded"] == ["broken-skill"]
+        # Unscannable content can't be checked, so Guardian is never called —
+        # it's excluded purely because it couldn't be verified safe.
+        mock_safety.assert_not_called()
+        config.exclude_skill.assert_called_once()
+        assert config.exclude_skill.call_args.args[0] == "broken-skill"

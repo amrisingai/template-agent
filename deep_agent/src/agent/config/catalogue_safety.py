@@ -103,7 +103,20 @@ async def _scan_skills(config: "AgentConfig") -> list[str]:
         try:
             skill_cfg: dict[str, Any] = parse_frontmatter(skill_md)
         except Exception as exc:
-            logger.warning("Failed to parse skill '%s' for safety scan: %s", name, exc)
+            # Fail closed: a SKILL.md that can't be parsed can't be scanned,
+            # but the directory-based skill index (_scan_available_skills)
+            # loads it regardless of parse success — unlike subagents, which
+            # are dropped entirely on a parse failure (_load_all_subagents).
+            # Leaving it available here would let a deliberately malformed
+            # frontmatter (with a malicious body) bypass this scan entirely.
+            logger.warning(
+                "catalogue_content_unscannable",
+                kind="skill",
+                name=name,
+                error=str(exc),
+            )
+            config.exclude_skill(name, reason=f"SKILL.md failed to parse: {exc}")
+            excluded.append(name)
             continue
 
         text = "\n\n".join(
