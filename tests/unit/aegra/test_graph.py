@@ -300,6 +300,110 @@ class TestAgentFactory:
         )
 
     @pytest.mark.asyncio
+    async def test_explicit_tool_list_excludes_other_mcp_server_tools(self):
+        """Regression guard (OFFSEC-384): an explicit 'tools:' allow-list must not
+        be widened with the rest of a declared MCP server's tools.
+
+        Before this fix, graph.py unconditionally unioned every MCP tool not
+        already in the resolved set back into the agent's tool list, even when
+        the agent declared an explicit 'tools:' allow-list -- silently
+        expanding a reviewed manifest to the server's entire live tool set.
+        """
+        mock_compiled = MagicMock()
+        mock_config = MagicMock()
+        mock_config.get_orchestrator_config.return_value = {
+            "name": "orchestrator",
+            "model": "gemini-2.5-flash",
+            "body": "test prompt",
+            "skill_paths": [],
+            "tools": ["identify_dataproducts"],
+            "mcps": ["dataverse-mcp-prod1"],
+        }
+        mock_config.resolve_agent_middleware.return_value = MagicMock(
+            skills_enabled=True
+        )
+
+        allowed_tool = MagicMock()
+        allowed_tool.name = "identify_dataproducts"
+        allowed_tool.description = "Identifies data products"
+        allowed_tool.args_schema = None
+
+        # Same MCP server also exposes this tool, but it is not in the
+        # declared 'tools:' list -- it must NOT end up in the built agent.
+        other_tool = MagicMock()
+        other_tool.name = "delete_dataproducts"
+        other_tool.description = "Deletes data products"
+        other_tool.args_schema = None
+
+        mock_config.resolve_tools.return_value = [allowed_tool]
+
+        mock_runtime = MagicMock()
+        mock_runtime.user = None
+
+        _reset_graph_state()
+
+        with (
+            patch(
+                "deep_agent.src.agent.config.agent_config",
+                mock_config,
+            ),
+            patch(
+                "deep_agent.src.infrastructure.providers.register_profiles_from_config",
+                return_value=None,
+            ),
+            patch(
+                "deep_agent.src.agent.config.model.parse_model_config",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "deep_agent.src.cache.model_cache.get_or_create_model_from_spec",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "deep_agent.aegra.mcp.get_mcp_tools",
+                new_callable=AsyncMock,
+                return_value=[allowed_tool, other_tool],
+            ),
+            patch(
+                "deep_agent.src.infrastructure.subagents.load_subagents",
+                return_value=None,
+            ),
+            patch(
+                "deep_agent.src.infrastructure.backend.get_configured_backend",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "deep_agent.src.infrastructure.async_tasks.build_async_middleware",
+                return_value=None,
+            ),
+            patch(
+                "deep_agent.src.infrastructure.middleware.build_middleware_list",
+                return_value=[],
+            ),
+            patch(
+                "deep_agent.src.infrastructure.middleware.resolve_memory_param",
+                return_value=None,
+            ),
+            patch("deep_agent.aegra.graph._ensure_startup", new_callable=AsyncMock),
+            patch(
+                "deepagents.create_deep_agent", return_value=mock_compiled
+            ) as mock_create,
+            patch(
+                "deep_agent.src.settings.settings.LIFECYCLE_PERSISTENCE_ENABLED",
+                False,
+            ),
+        ):
+            from deep_agent.aegra.graph import agent
+
+            result = await agent(mock_runtime)
+
+        assert result is mock_compiled
+        built_tools = mock_create.call_args.kwargs["tools"]
+        built_names = [t.name for t in built_tools]
+        assert built_names == [allowed_tool.name]
+        assert other_tool.name not in built_names
+
+    @pytest.mark.asyncio
     async def test_hitl_passes_interrupt_on_when_enabled(self):
         """create_deep_agent must receive a non-empty interrupt_on dict when HITL is enabled."""
         from deep_agent.src.agent.config.middleware import HumanApprovalConfig
