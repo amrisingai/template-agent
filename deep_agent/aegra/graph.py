@@ -104,8 +104,22 @@ def _graph_fingerprint(
     max_tokens: int | None = None,
     mcp_names: list[str] | None = None,
     resource_uris: list[str] | None = None,
+    catalogue_state: str | None = None,
 ) -> str:
-    """Stable fingerprint for graph cache keying."""
+    """Stable fingerprint for graph cache keying.
+
+    ``catalogue_state`` should be a cheap, stable summary of which
+    subagents/skills are *currently* available (e.g. their sorted names) at
+    the moment the caller is about to build/reuse a graph. Without it, a
+    catalogue-safety exclusion that removes a subagent or skill (OFFSEC-379)
+    does not change any of the other fingerprint inputs — model, prompt,
+    tool names, HITL/MCP/resource config are all orchestrator-level and
+    unaffected by which subagents/skills are currently excluded — so a
+    ``_graph_cache`` entry compiled *before* the exclusion would otherwise
+    keep being served after it, still exposing the excluded content (e.g. via
+    ``SkillsMiddleware``, which freezes its skill source-path list at graph
+    construction time).
+    """
     hitl_flag = (
         f"hitl={int(hitl_enabled)}"
         f",mode={hitl_mode}"
@@ -114,11 +128,29 @@ def _graph_fingerprint(
     model_flag = f"temp={temperature},max_tokens={max_tokens}"
     mcp_flag = ",".join(sorted(mcp_names or []))
     resources_flag = ",".join(sorted(resource_uris or []))
+    catalogue_flag = catalogue_state or ""
     raw = (
         f"{model_name}\0{system_prompt}\0{','.join(sorted(tool_names))}"
         f"\0{hitl_flag}\0{model_flag}\0{mcp_flag}\0{resources_flag}"
+        f"\0{catalogue_flag}"
     )
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+def _catalogue_state_fingerprint(
+    subagent_configs: dict[str, Any] | None,
+    available_skills: dict[str, Any] | None,
+) -> str:
+    """Summarize which subagent/skill names are currently available.
+
+    Built from the exact pinned snapshot returned by
+    ``ensure_catalogue_safety_scanned`` (not a fresh ``AgentConfig`` read), so
+    it stays consistent with whatever was just scanned and is about to be
+    used for graph construction (OFFSEC-379).
+    """
+    subagent_names = ",".join(sorted((subagent_configs or {}).keys()))
+    skill_names = ",".join(sorted((available_skills or {}).keys()))
+    return f"{subagent_names}|{skill_names}"
 
 
 async def _ensure_startup() -> None:  # noqa: E402
@@ -277,8 +309,14 @@ async def agent(runtime: ServerRuntime) -> Any:
     # graph construction (OFFSEC-379). Excluded names stick across the
     # additional reloads triggered by the getters below
     # (AgentConfig._reapply_exclusions), so ordering only needs to guarantee
-    # this runs first, not that no further reload happens afterward.
-    await ensure_catalogue_safety_scanned(agent_config)
+    # this runs first, not that no further reload happens afterward. The
+    # returned snapshot (subagent_configs/available_skills) is the exact
+    # content that was scanned; it is threaded through below to
+    # load_subagents() and into the graph cache key so graph construction is
+    # provably built from what was validated, not from a later, independent
+    # AgentConfig reload that could have picked up different content
+    # (OFFSEC-379 TOCTOU).
+    catalogue_scan = await ensure_catalogue_safety_scanned(agent_config)
 
     user = getattr(runtime, "user", None)
     sso_token = getattr(user, "access_token", None) if user else None
@@ -300,9 +338,29 @@ async def agent(runtime: ServerRuntime) -> Any:
     agent_name = orchestrator_cfg.get("name", "orchestrator")
     orch_model_raw = orchestrator_cfg.get("model", "gemini-3.1-pro-preview")
     system_prompt = orchestrator_cfg.get("body", "")
-    skill_paths = orchestrator_cfg.get("skill_paths", [])
     tool_names = orchestrator_cfg.get("tools", [])
     mcp_server_names = orchestrator_cfg.get("mcps", [])
+
+    # Resolve the orchestrator's own skill *names* (stable PROMPT.md
+    # frontmatter, not catalogue content) against the pinned
+    # available_skills snapshot from the scan above, rather than trusting
+    # orchestrator_cfg["skill_paths"] — which get_orchestrator_config() just
+    # recomputed from whatever AgentConfig._available_skills looked like at
+    # *its own*, independent reload. Using the pinned snapshot here keeps
+    # skill availability consistent with what was actually scanned
+    # (OFFSEC-379 TOCTOU).
+    from deep_agent.src.agent.config.resolver import resolve_skill_paths
+
+    skill_names = orchestrator_cfg.get("skills", [])
+    skill_paths = (
+        resolve_skill_paths(
+            skill_names,
+            catalogue_scan.get("available_skills") or {},
+            agent_name=agent_name,
+        )
+        if skill_names
+        else []
+    )
 
     # Resolve the personalization user ID to match what the BFF proxy
     # sends as X-User-ID (preferred_username from JWT, not sub UUID).
@@ -443,6 +501,10 @@ async def agent(runtime: ServerRuntime) -> Any:
         max_tokens=int(orch_max_tokens) if orch_max_tokens else None,
         mcp_names=mcp_server_names or None,
         resource_uris=orchestrator_cfg.get("resources") or None,
+        catalogue_state=_catalogue_state_fingerprint(
+            catalogue_scan.get("subagent_configs"),
+            catalogue_scan.get("available_skills"),
+        ),
     )
     now = time.time()
     graph_ttl = float(agent_config.get_cache_config().graph.ttl)
@@ -454,7 +516,15 @@ async def agent(runtime: ServerRuntime) -> Any:
 
     logger.warning("Graph cache MISS — full rebuild")
 
-    subagents = load_subagents(tools=mcp_tools)
+    # Pass the exact snapshot ensure_catalogue_safety_scanned() just scanned,
+    # rather than letting load_subagents() call
+    # agent_config.get_all_subagent_configs() itself — that call would
+    # trigger its own independent reload and could return different content
+    # than what was validated above (OFFSEC-379 TOCTOU).
+    subagents = load_subagents(
+        tools=mcp_tools,
+        subagent_configs=catalogue_scan.get("subagent_configs"),
+    )
     backend = get_configured_backend()
 
     middleware = build_middleware_list(

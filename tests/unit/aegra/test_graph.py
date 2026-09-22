@@ -49,6 +49,7 @@ class TestAgentFactory:
     async def test_builds_agent_without_user(self):
         mock_compiled = MagicMock()
         mock_config = MagicMock()
+        mock_config.get_catalogue_snapshot.return_value = ({}, {})
         mock_config.get_orchestrator_config.return_value = {
             "name": "orchestrator",
             "model": "gemini-2.5-flash",
@@ -124,6 +125,7 @@ class TestAgentFactory:
     async def test_builds_agent_with_sso_token(self):
         mock_compiled = MagicMock()
         mock_config = MagicMock()
+        mock_config.get_catalogue_snapshot.return_value = ({}, {})
         mock_config.get_orchestrator_config.return_value = {
             "name": "orchestrator",
             "model": "gemini-2.5-flash",
@@ -212,6 +214,7 @@ class TestAgentFactory:
     async def test_exposes_all_mcp_tools_when_mcps_declared_without_tool_list(self):
         mock_compiled = MagicMock()
         mock_config = MagicMock()
+        mock_config.get_catalogue_snapshot.return_value = ({}, {})
         mock_config.get_orchestrator_config.return_value = {
             "name": "orchestrator",
             "model": "gemini-2.5-flash",
@@ -301,6 +304,7 @@ class TestAgentFactory:
 
         mock_compiled = MagicMock()
         mock_config = MagicMock()
+        mock_config.get_catalogue_snapshot.return_value = ({}, {})
         mock_config.get_orchestrator_config.return_value = {
             "name": "orchestrator",
             "model": "gemini-2.5-flash",
@@ -398,6 +402,7 @@ class TestAgentFactory:
 
         mock_compiled = MagicMock()
         mock_config = MagicMock()
+        mock_config.get_catalogue_snapshot.return_value = ({}, {})
         mock_config.get_orchestrator_config.return_value = {
             "name": "orchestrator",
             "model": "gemini-2.5-flash",
@@ -524,6 +529,54 @@ class TestGraphHelpers:
         assert fp_resources != fp_mcps
         assert fp_resources_order == fp_resources_order_rev
 
+    def test_graph_fingerprint_includes_catalogue_state(self):
+        """OFFSEC-379 (CodeRabbit finding 1 on PR #355): the cache key must
+        change when the set of available subagents/skills changes, even if
+        model/prompt/tools/hitl/mcp/resources are all identical — otherwise a
+        catalogue-safety exclusion wouldn't invalidate a stale cache entry.
+        """
+        from deep_agent.aegra.graph import _graph_fingerprint
+
+        base = dict(model_name="model", system_prompt="prompt", tool_names=["t"])
+        fp_no_state = _graph_fingerprint(**base)
+        fp_empty_state = _graph_fingerprint(**base, catalogue_state="")
+        fp_with_skill = _graph_fingerprint(**base, catalogue_state="|safe-skill")
+        fp_without_skill = _graph_fingerprint(**base, catalogue_state="|")
+
+        assert fp_no_state == fp_empty_state
+        assert fp_with_skill != fp_without_skill
+        assert fp_with_skill != fp_no_state
+
+    def test_catalogue_state_fingerprint_reflects_available_names(self):
+        """_catalogue_state_fingerprint must change when a subagent or skill
+        is excluded (removed from the pinned snapshot dicts), and be
+        insensitive to dict ordering.
+        """
+        from deep_agent.aegra.graph import _catalogue_state_fingerprint
+
+        before = _catalogue_state_fingerprint(
+            subagent_configs={"analyst": {}, "researcher": {}},
+            available_skills={"safe-skill": object()},
+        )
+        after_subagent_excluded = _catalogue_state_fingerprint(
+            subagent_configs={"researcher": {}},
+            available_skills={"safe-skill": object()},
+        )
+        after_skill_excluded = _catalogue_state_fingerprint(
+            subagent_configs={"analyst": {}, "researcher": {}},
+            available_skills={},
+        )
+        reordered = _catalogue_state_fingerprint(
+            subagent_configs={"researcher": {}, "analyst": {}},
+            available_skills={"safe-skill": object()},
+        )
+        empty = _catalogue_state_fingerprint(None, None)
+
+        assert after_subagent_excluded != before
+        assert after_skill_excluded != before
+        assert reordered == before  # order-independent
+        assert empty == "|"
+
     def test_invalidate_graph_cache_clears_caches(self):
         import time
 
@@ -563,6 +616,7 @@ class TestGraphCacheHit:
         graph._graph_cache_ts[fixed_key] = time.time()
 
         mock_config = MagicMock()
+        mock_config.get_catalogue_snapshot.return_value = ({}, {})
         mock_config.get_orchestrator_config.return_value = {
             "name": "orchestrator",
             "model": "gemini-2.5-flash",
@@ -634,6 +688,7 @@ class TestGraphCacheHit:
 
     def _mock_orch_config(self, **orch_overrides):
         mock_config = MagicMock()
+        mock_config.get_catalogue_snapshot.return_value = ({}, {})
         orch = {
             "name": "orchestrator",
             "model": "gemini-2.5-flash",
@@ -807,6 +862,7 @@ class TestGuardianActivationGate:
 
     def _build_mock_config(self, guardrails_enabled: bool) -> MagicMock:
         mock_config = MagicMock()
+        mock_config.get_catalogue_snapshot.return_value = ({}, {})
         mock_config.get_orchestrator_config.return_value = {
             "name": "orchestrator",
             "model": "gemini-2.5-flash",
@@ -991,3 +1047,171 @@ class TestGuardianActivationGate:
         assert result is mock_compiled
         system_prompt_used = mock_create.call_args.kwargs["system_prompt"]
         assert "STOP ALL WORK" not in system_prompt_used
+
+
+class TestGraphCacheInvalidationOnCatalogueExclusion:
+    """Regression tests for OFFSEC-379 CodeRabbit finding 1 (PR #355).
+
+    ``_graph_cache``'s key previously only depended on
+    model/prompt/tool-names/hitl/mcp/resources — none of which change when
+    ``ensure_catalogue_safety_scanned`` excludes a subagent or skill. A stale
+    cache entry built while that subagent/skill was still present would
+    therefore keep being served (and, for skills specifically, would keep
+    exposing the excluded skill via ``SkillsMiddleware``'s frozen
+    ``sources`` list — see ``_graph_fingerprint``'s docstring). These tests
+    prove a request observing a smaller catalogue snapshot than a previous
+    request (same model/prompt/tools otherwise) always rebuilds instead of
+    reusing the earlier cache entry.
+    """
+
+    @staticmethod
+    def _mock_config(catalogue_snapshot):
+        mock_config = MagicMock()
+        mock_config.get_orchestrator_config.return_value = {
+            "name": "orchestrator",
+            "model": "gemini-2.5-flash",
+            "body": "test prompt",
+            "skills": [],
+            "tools": [],
+        }
+        mock_config.resolve_tools.return_value = []
+        mock_config.resolve_agent_middleware.return_value = MagicMock(
+            skills_enabled=True
+        )
+        mock_config.get_guardrails_config.return_value = MagicMock(enabled=False)
+        mock_config.get_cache_config.return_value.graph.ttl = 3600
+        mock_config.get_catalogue_snapshot.return_value = catalogue_snapshot
+        return mock_config
+
+    @staticmethod
+    def _patches(mock_config, mock_load_subagents, mock_create):
+        return [
+            patch("deep_agent.src.agent.config.agent_config", mock_config),
+            patch(
+                "deep_agent.aegra.mcp_resource_tools._get_server_configs",
+                return_value={},
+            ),
+            patch(
+                "deep_agent.src.infrastructure.providers.register_profiles_from_config",
+                return_value=None,
+            ),
+            patch(
+                "deep_agent.src.agent.config.model.parse_model_config",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "deep_agent.src.cache.model_cache.get_or_create_model_from_spec",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "deep_agent.aegra.mcp.get_mcp_tools",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch(
+                "deep_agent.src.infrastructure.subagents.load_subagents",
+                mock_load_subagents,
+            ),
+            patch(
+                "deep_agent.src.infrastructure.backend.get_configured_backend",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "deep_agent.src.infrastructure.async_tasks.build_async_middleware",
+                return_value=None,
+            ),
+            patch(
+                "deep_agent.src.infrastructure.middleware.build_middleware_list",
+                return_value=[],
+            ),
+            patch(
+                "deep_agent.src.infrastructure.middleware.resolve_memory_param",
+                return_value=None,
+            ),
+            patch("deep_agent.aegra.graph._ensure_startup", new_callable=AsyncMock),
+            patch("deepagents.create_deep_agent", mock_create),
+            patch(
+                "deep_agent.src.settings.settings.LIFECYCLE_PERSISTENCE_ENABLED",
+                False,
+            ),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_excluding_a_subagent_invalidates_the_cached_graph(self):
+        import contextlib
+
+        _reset_graph_state()
+
+        mock_config = self._mock_config(
+            (
+                {"analyst": {"description": "Analyzes data.", "body": "Be helpful."}},
+                {},
+            )
+        )
+        mock_compiled_1 = MagicMock(name="compiled_1")
+        mock_compiled_2 = MagicMock(name="compiled_2")
+        mock_create = MagicMock(side_effect=[mock_compiled_1, mock_compiled_2])
+        mock_load_subagents = MagicMock(return_value=None)
+        mock_runtime = MagicMock()
+        mock_runtime.user = None
+
+        with contextlib.ExitStack() as stack:
+            for p in self._patches(mock_config, mock_load_subagents, mock_create):
+                stack.enter_context(p)
+
+            from deep_agent.aegra.graph import agent
+
+            result1 = await agent(mock_runtime)
+            assert mock_create.call_count == 1
+            assert result1 is mock_compiled_1
+            assert "analyst" in mock_load_subagents.call_args.kwargs["subagent_configs"]
+
+            # Simulate ensure_catalogue_safety_scanned excluding "analyst" on
+            # the *next* request (e.g. a Guardian check newly flagged it) —
+            # model/prompt/tools/mcp/resources are all unchanged.
+            mock_config.get_catalogue_snapshot.return_value = ({}, {})
+
+            result2 = await agent(mock_runtime)
+
+        # Must NOT be a cache hit: create_deep_agent (and load_subagents)
+        # must run again against the reduced subagent set, not reuse the
+        # first, now-stale compiled graph.
+        assert mock_create.call_count == 2
+        assert result2 is mock_compiled_2
+        assert result2 is not result1
+        assert mock_load_subagents.call_args.kwargs["subagent_configs"] == {}
+
+    @pytest.mark.asyncio
+    async def test_unchanged_catalogue_state_still_hits_cache(self):
+        """Sanity check: the fix must not defeat caching entirely — a second
+        request with an *unchanged* catalogue snapshot (same subagents/
+        skills, same everything else) must still hit the cache.
+        """
+        import contextlib
+
+        _reset_graph_state()
+
+        mock_config = self._mock_config(
+            (
+                {"analyst": {"description": "Analyzes data.", "body": "Be helpful."}},
+                {},
+            )
+        )
+        mock_compiled = MagicMock(name="compiled")
+        mock_create = MagicMock(return_value=mock_compiled)
+        mock_load_subagents = MagicMock(return_value=None)
+        mock_runtime = MagicMock()
+        mock_runtime.user = None
+
+        with contextlib.ExitStack() as stack:
+            for p in self._patches(mock_config, mock_load_subagents, mock_create):
+                stack.enter_context(p)
+
+            from deep_agent.aegra.graph import agent
+
+            result1 = await agent(mock_runtime)
+            result2 = await agent(mock_runtime)
+
+        assert mock_create.call_count == 1
+        assert result1 is mock_compiled
+        assert result2 is mock_compiled

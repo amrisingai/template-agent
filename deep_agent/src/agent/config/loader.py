@@ -651,6 +651,43 @@ class AgentConfig:
         self._ensure_loaded()
         return self._subagents
 
+    def get_catalogue_snapshot(
+        self,
+    ) -> tuple[dict[str, dict[str, Any]], dict[str, Path]]:
+        """Reload-if-due once and return subagent configs + available skills together.
+
+        ``get_all_subagent_configs()`` and ``get_available_skills()`` each call
+        ``_ensure_loaded()`` independently, and ``_ensure_loaded()`` performs a
+        full reload-from-disk on *every* call when ``CONFIG_AUTO_RELOAD`` is
+        set — so fetching both sections via two separate getter calls costs two
+        redundant reloads instead of one. Calling this method once instead
+        guarantees exactly one reload for both sections combined, and — because
+        both dicts come from that same reload — hands back a mutually
+        consistent pair: safe to scan (see
+        ``catalogue_safety.ensure_catalogue_safety_scanned``) and then reuse
+        for graph construction without an intervening, possibly-divergent
+        reload picking up different on-disk content in between (OFFSEC-379).
+
+        Returns:
+            ``(subagent_configs, available_skills)`` — the live internal
+            dicts at the moment of this call (not copies). A caller holding
+            this snapshot is unaffected by any *later*, separate reload
+            (which reassigns ``self._subagents``/``self._available_skills``
+            to new dict objects rather than mutating these ones) — that is
+            the main property callers should rely on. Note that
+            ``exclude_subagent``/``exclude_skill`` themselves call
+            ``_ensure_loaded()`` first, so under ``CONFIG_AUTO_RELOAD`` a
+            call to either *after* this snapshot was taken will itself
+            trigger a fresh reload and mutate whatever the *new*
+            ``self._subagents``/``self._available_skills`` objects are, not
+            necessarily these ones — callers that need this snapshot to
+            reflect exclusions decided from scanning it (see
+            ``catalogue_safety.ensure_catalogue_safety_scanned``) must strip
+            those names from it explicitly rather than relying on aliasing.
+        """
+        self._ensure_loaded()
+        return self._subagents, self._available_skills
+
     def get_available_skills(self) -> dict[str, Path]:
         """Get all available skill directory paths, keyed by skill name.
 

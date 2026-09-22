@@ -513,6 +513,130 @@ Researcher prompt.
         assert all("unsafe-skill" not in p for p in subs["analyst"]["skill_paths"])
 
 
+class TestGetCatalogueSnapshot:
+    """Tests for AgentConfig.get_catalogue_snapshot (OFFSEC-379 CodeRabbit
+    findings 2 & 3 on PR #355: single reload + TOCTOU-safe snapshot pinning).
+    """
+
+    def setup_method(self):
+        """Reset the singleton before each test."""
+        AgentConfig._instance = None
+
+    def _make_config_dir(self, tmp_path):
+        config_dir = tmp_path / "agent_config"
+        config_dir.mkdir()
+
+        skills_dir = config_dir / "skills"
+        skills_dir.mkdir()
+        (skills_dir / "safe-skill").mkdir()
+
+        (config_dir / "PROMPT.md").write_text(
+            "---\nname: orchestrator\nmodel: gemini-2.5-flash\n---\n\nPrompt.\n"
+        )
+
+        subagents_dir = config_dir / "subagents"
+        subagents_dir.mkdir()
+        (subagents_dir / "analyst.md").write_text(
+            "---\nname: analyst\nmodel: gemini-2.5-flash\n"
+            "description: Analyzes things.\n---\n\nAnalyst prompt.\n"
+        )
+        return config_dir
+
+    def test_returns_both_sections_matching_individual_getters(self, tmp_path):
+        cfg = AgentConfig(self._make_config_dir(tmp_path))
+
+        subagent_configs, available_skills = cfg.get_catalogue_snapshot()
+
+        assert set(subagent_configs) == {"analyst"}
+        assert set(available_skills) == {"safe-skill"}
+
+    def test_reloads_at_most_once_per_call(self, tmp_path):
+        """The single biggest point of finding 2: get_all_subagent_configs()
+        + get_available_skills() called separately each trigger their own
+        full reload-from-disk under CONFIG_AUTO_RELOAD. get_catalogue_snapshot()
+        must reload at most once for both sections combined.
+        """
+        cfg = AgentConfig(self._make_config_dir(tmp_path))
+        # Prime the initial (non-reload) load.
+        cfg.get_catalogue_snapshot()
+
+        with patch("deep_agent.src.agent.config.loader.settings") as mock_settings:
+            mock_settings.CONFIG_AUTO_RELOAD = True
+            with patch.object(
+                cfg, "_load_all_subagents", wraps=cfg._load_all_subagents
+            ) as mock_load_subagents:
+                cfg.get_catalogue_snapshot()
+
+        assert mock_load_subagents.call_count == 1
+
+    def test_exclude_after_snapshot_does_not_reliably_mutate_the_snapshot(
+        self, tmp_path
+    ):
+        """exclude_subagent/exclude_skill call _ensure_loaded() internally,
+        which — under the default CONFIG_AUTO_RELOAD=True — reassigns
+        AgentConfig's internal dicts to *new* objects before popping from
+        them. So excluding something after a snapshot was already captured
+        does NOT reliably mutate that snapshot in place; a caller that needs
+        the snapshot itself to reflect an exclusion decided from scanning it
+        must strip the name explicitly (see
+        catalogue_safety.ensure_catalogue_safety_scanned, which does this).
+        This test documents that behavior so it isn't silently assumed
+        elsewhere.
+        """
+        cfg = AgentConfig(self._make_config_dir(tmp_path))
+
+        subagent_configs, available_skills = cfg.get_catalogue_snapshot()
+        assert "analyst" in subagent_configs
+        assert "safe-skill" in available_skills
+
+        with patch("deep_agent.src.agent.config.loader.settings") as mock_settings:
+            mock_settings.CONFIG_AUTO_RELOAD = True
+            cfg.exclude_subagent("analyst", reason="flagged unsafe")
+            cfg.exclude_skill("safe-skill", reason="flagged unsafe")
+
+        # A *fresh* snapshot correctly reflects the exclusions...
+        fresh_subagent_configs, fresh_available_skills = cfg.get_catalogue_snapshot()
+        assert "analyst" not in fresh_subagent_configs
+        assert "safe-skill" not in fresh_available_skills
+
+        # ...but the dicts captured *before* the excludes were reassigned by
+        # exclude_subagent/exclude_skill's own internal reload, not mutated.
+        assert "analyst" in subagent_configs
+        assert "safe-skill" in available_skills
+
+    def test_snapshot_is_pinned_against_a_later_independent_reload(self, tmp_path):
+        """The core OFFSEC-379 TOCTOU fix: a snapshot captured by one call
+        must remain exactly as captured even after a *later*, separate
+        reload-from-disk replaces AgentConfig's internal dicts with new
+        objects (e.g. from an unrelated getter call elsewhere in the same
+        request).
+        """
+        config_dir = self._make_config_dir(tmp_path)
+        cfg = AgentConfig(config_dir)
+
+        subagent_configs, _ = cfg.get_catalogue_snapshot()
+        assert subagent_configs["analyst"]["description"] == "Analyzes things."
+
+        # Modify on-disk content and force a fresh reload via a *different*
+        # getter, simulating some other code path reloading independently
+        # after our snapshot was captured.
+        (config_dir / "subagents" / "analyst.md").write_text(
+            "---\nname: analyst\nmodel: gemini-2.5-flash\n"
+            "description: REPLACED CONTENT.\n---\n\nNew body.\n"
+        )
+        with patch("deep_agent.src.agent.config.loader.settings") as mock_settings:
+            mock_settings.CONFIG_AUTO_RELOAD = True
+            cfg.get_orchestrator_config()  # triggers a full reload
+
+        # The internal dict was reassigned to a new object by that reload...
+        assert (
+            cfg.get_all_subagent_configs()["analyst"]["description"]
+            == "REPLACED CONTENT."
+        )
+        # ...but our previously captured snapshot is untouched.
+        assert subagent_configs["analyst"]["description"] == "Analyzes things."
+
+
 class TestCatalogueScanFingerprints:
     """Tests for AgentConfig's per-name content fingerprint store (OFFSEC-379).
 

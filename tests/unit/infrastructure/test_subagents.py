@@ -33,6 +33,45 @@ class TestLoadSubagents:
 
             assert result is None
 
+    def test_load_subagents_uses_provided_snapshot_without_calling_getter(self):
+        """Regression for OFFSEC-379 CodeRabbit finding 3 (PR #355): when a
+        pinned subagent_configs snapshot is passed in (e.g. the exact dict
+        catalogue_safety.ensure_catalogue_safety_scanned just scanned),
+        load_subagents() must build from that snapshot as-is and must NOT
+        call agent_config.get_all_subagent_configs() itself — that call
+        would trigger AgentConfig's own independent reload-from-disk under
+        CONFIG_AUTO_RELOAD and could return different (unscanned) content
+        than what was pinned (a TOCTOU gap).
+        """
+        with (
+            patch(
+                "deep_agent.src.infrastructure.subagents.agent_config.get_all_subagent_configs"
+            ) as mock_get_configs,
+            patch(
+                "deep_agent.src.infrastructure.subagents.agent_config.get_orchestrator_config",
+                return_value={},
+            ),
+        ):
+            result = load_subagents(tools=[], subagent_configs={})
+
+            assert result is None
+            mock_get_configs.assert_not_called()
+
+    def test_load_subagents_falls_back_to_getter_when_snapshot_omitted(self):
+        """Callers that don't have a pinned snapshot (e.g. these existing
+        tests, or call sites outside the per-request graph-build path) must
+        keep working exactly as before.
+        """
+        with patch(
+            "deep_agent.src.infrastructure.subagents.agent_config.get_all_subagent_configs"
+        ) as mock_get_configs:
+            mock_get_configs.return_value = {}
+
+            result = load_subagents(tools=[])
+
+            assert result is None
+            mock_get_configs.assert_called_once()
+
     def test_load_subagents_raises_error_when_model_missing(self):
         """Test that load_subagents uses default model when none configured."""
         mock_model = MagicMock()

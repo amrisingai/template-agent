@@ -48,6 +48,7 @@ VALID_AGENT_TYPES = ("default", "compiled", "async")
 
 def load_subagents(
     tools: list[Any],
+    subagent_configs: dict[str, dict[str, Any]] | None = None,
 ) -> list[Any] | None:
     """Build subagents from pre-loaded configurations.
 
@@ -63,6 +64,16 @@ def load_subagents(
 
     Args:
         tools: List of available MCP tools.
+        subagent_configs: Optional pre-fetched subagent-config snapshot (e.g.
+            the exact dict ``catalogue_safety.ensure_catalogue_safety_scanned``
+            just scanned). When provided, this is used as-is instead of
+            calling ``agent_config.get_all_subagent_configs()`` — that call
+            would trigger its own independent reload-from-disk under
+            ``CONFIG_AUTO_RELOAD``, which could return different content
+            than whatever was just safety-scanned (OFFSEC-379 TOCTOU). Callers
+            that don't go through the catalogue safety scan (e.g. tests, or
+            call sites outside the per-request graph-build path) can omit
+            this to fall back to the normal getter.
 
     Returns:
         List of configured subagent instances, or None if no subagents configured.
@@ -71,7 +82,9 @@ def load_subagents(
         SubAgentError: If a subagent fails to build (missing model, bad config).
     """
     all_subagent_configs: dict[str, dict[str, Any]] = (
-        agent_config.get_all_subagent_configs()
+        subagent_configs
+        if subagent_configs is not None
+        else agent_config.get_all_subagent_configs()
     )
 
     if not all_subagent_configs:
