@@ -6,6 +6,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from deep_agent.src.capability.tool_proxy import CapabilityToolProxy
+
 _runtime_mock = MagicMock()
 if "langgraph_sdk.runtime" not in sys.modules:
     sys.modules["langgraph_sdk.runtime"] = _runtime_mock
@@ -217,7 +219,9 @@ class TestAgentFactory:
             "model": "gemini-2.5-flash",
             "body": "test prompt",
             "skill_paths": [],
-            "tools": [],
+            # 'tools:' key genuinely absent (not an explicit empty list) --
+            # that omission is what should trigger the implicit-all-mcp grant
+            # below (OFFSEC-384 review: the two must not be conflated).
             "mcps": ["dataverse-mcp-prod1"],
         }
         mock_config.resolve_tools.return_value = []
@@ -293,8 +297,10 @@ class TestAgentFactory:
         assert result is mock_compiled
         built_tools = mock_create.call_args.kwargs["tools"]
         # Tools are wrapped by CapabilityToolProxy (OFFSEC-384); compare by
-        # name rather than identity.
+        # name rather than identity, and confirm the enforcement wrapper
+        # itself is actually present (not just a same-named passthrough).
         assert [t.name for t in built_tools] == [mock_tool.name]
+        assert all(isinstance(t, CapabilityToolProxy) for t in built_tools)
         mock_get_mcp.assert_awaited_once_with(
             sso_token=None, server_names=["dataverse-mcp-prod1"], user_id=None
         )
@@ -402,6 +408,7 @@ class TestAgentFactory:
         built_names = [t.name for t in built_tools]
         assert built_names == [allowed_tool.name]
         assert other_tool.name not in built_names
+        assert all(isinstance(t, CapabilityToolProxy) for t in built_tools)
 
     @pytest.mark.asyncio
     async def test_hitl_passes_interrupt_on_when_enabled(self):

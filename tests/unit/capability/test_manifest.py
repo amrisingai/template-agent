@@ -2,6 +2,8 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from deep_agent.src.capability.manifest import (
     EXPLICIT,
     IMPLICIT_ALL_MCP,
@@ -45,30 +47,30 @@ class TestCapabilityManifest:
         )
         assert manifest.allows("anything") is False
 
-        def test_is_frozen(self):
-            manifest = CapabilityManifest(
-                agent_name="a", allowed_tool_names=frozenset(), source=NONE
-            )
-            with __import__("pytest").raises(Exception):
-                manifest.agent_name = "b"  # type: ignore[misc]
+    def test_is_frozen(self):
+        manifest = CapabilityManifest(
+            agent_name="a", allowed_tool_names=frozenset(), source=NONE
+        )
+        with pytest.raises(Exception):
+            manifest.agent_name = "b"  # type: ignore[misc]
 
-        def test_merged_with_adds_names_without_mutating_original(self):
-            original = CapabilityManifest(
-                agent_name="orchestrator",
-                allowed_tool_names=frozenset({"search"}),
-                source=EXPLICIT,
-            )
+    def test_merged_with_adds_names_without_mutating_original(self):
+        original = CapabilityManifest(
+            agent_name="orchestrator",
+            allowed_tool_names=frozenset({"search"}),
+            source=EXPLICIT,
+        )
 
-            merged = original.merged_with(["mcp_read_resource", "mcp_list_resources"])
+        merged = original.merged_with(["mcp_read_resource", "mcp_list_resources"])
 
-            assert merged.allows("search") is True
-            assert merged.allows("mcp_read_resource") is True
-            assert merged.allows("mcp_list_resources") is True
-            assert merged.agent_name == "orchestrator"
-            assert merged.source == EXPLICIT
-            # Original manifest must be unaffected (frozen dataclass semantics).
-            assert original.allowed_tool_names == frozenset({"search"})
-            assert original.allows("mcp_read_resource") is False
+        assert merged.allows("search") is True
+        assert merged.allows("mcp_read_resource") is True
+        assert merged.allows("mcp_list_resources") is True
+        assert merged.agent_name == "orchestrator"
+        assert merged.source == EXPLICIT
+        # Original manifest must be unaffected (frozen dataclass semantics).
+        assert original.allowed_tool_names == frozenset({"search"})
+        assert original.allows("mcp_read_resource") is False
 
 
 # ---------------------------------------------------------------------------
@@ -113,11 +115,12 @@ class TestResolveCapabilityManifestExplicit:
 
 class TestResolveCapabilityManifestImplicit:
     def test_declared_mcp_servers_without_explicit_tools_grants_all(self):
+        """`tools:` genuinely omitted (None) -- not merely an empty list."""
         available = [_tool("search"), _tool("write_file")]
 
         with patch("deep_agent.src.audit.emitter.emit_audit_event") as emit:
             tools, manifest = resolve_capability_manifest(
-                [],
+                None,
                 available,
                 mcp_server_names=["some-mcp"],
                 agent_name="orchestrator",
@@ -139,11 +142,34 @@ class TestResolveCapabilityManifestImplicit:
             side_effect=RuntimeError("sink unavailable"),
         ):
             tools, manifest = resolve_capability_manifest(
-                [], available, mcp_server_names=["some-mcp"], agent_name="orchestrator"
+                None,
+                available,
+                mcp_server_names=["some-mcp"],
+                agent_name="orchestrator",
             )
 
         assert tools == available
         assert manifest.source == IMPLICIT_ALL_MCP
+
+    def test_explicit_empty_tools_list_does_not_grant_all(self):
+        """Regression guard (OFFSEC-384 review): an author writing `tools: []`
+        on purpose is the most restrictive possible declaration and must not
+        be treated the same as omitting `tools:` altogether -- it must NOT
+        fall back to granting every tool on the declared MCP server(s)."""
+        available = [_tool("search"), _tool("write_file")]
+
+        with patch("deep_agent.src.audit.emitter.emit_audit_event") as emit:
+            tools, manifest = resolve_capability_manifest(
+                [],
+                available,
+                mcp_server_names=["some-mcp"],
+                agent_name="orchestrator",
+            )
+
+        assert tools == []
+        assert manifest.source == NONE
+        assert manifest.allowed_tool_names == frozenset()
+        emit.assert_not_called()
 
 
 class TestResolveCapabilityManifestNone:

@@ -401,7 +401,10 @@ def _resolve_and_enforce_subagent_tools(
         resolve_capability_manifest,
     )
 
-    tool_names: list[str] = agent_cfg.get("tools", [])
+    # No default here: a `None` (key absent) must stay distinguishable from
+    # an explicit `tools: []` for resolve_capability_manifest's fallback
+    # logic (OFFSEC-384).
+    tool_names: list[str] | None = agent_cfg.get("tools")
     mcp_names: list[str] = agent_cfg.get("mcps", [])
 
     resolved_tools, manifest = resolve_capability_manifest(

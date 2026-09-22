@@ -77,7 +77,7 @@ class CapabilityManifest:
 
 
 def resolve_capability_manifest(
-    tool_names: list[str],
+    tool_names: list[str] | None,
     available_tools: list[Any],
     mcp_server_names: list[str] | None,
     agent_name: str = "agent",
@@ -85,7 +85,12 @@ def resolve_capability_manifest(
     """Resolve the enforced tool list and the manifest that will police it.
 
     Args:
-        tool_names: Explicit ``tools:`` frontmatter list, if any.
+        tool_names: Explicit ``tools:`` frontmatter list, if any. Callers
+            must pass ``None`` when the ``tools:`` key is absent from
+            frontmatter entirely (e.g. ``agent_cfg.get("tools")``, not
+            ``agent_cfg.get("tools", [])``) so an *omitted* field can be
+            told apart from an author writing ``tools: []`` on purpose --
+            the two must not collapse to the same fallback behaviour below.
         available_tools: All tools currently reachable from the agent's
             declared MCP servers.
         mcp_server_names: Declared ``mcps:`` frontmatter list, if any.
@@ -116,7 +121,13 @@ def resolve_capability_manifest(
             source=EXPLICIT,
         )
 
-    if not tool_names and mcp_server_names and available_tools:
+    # `tool_names == []` (author wrote an explicit empty allow-list) must NOT
+    # fall through to the implicit-all-mcp grant below -- that would make the
+    # most restrictive possible declaration behave identically to omitting
+    # `tools:` altogether, i.e. the opposite of what the author asked for.
+    # Only a genuinely *omitted* field (`tool_names is None`) gets the
+    # implicit fallback.
+    if tool_names is None and mcp_server_names and available_tools:
         logger.info(
             "capability_implicit_grant",
             agent=agent_name,

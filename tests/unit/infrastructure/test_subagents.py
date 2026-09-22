@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from deep_agent.src.agent.config.model import ModelSpec, Provider
+from deep_agent.src.capability.tool_proxy import CapabilityToolProxy
 from deep_agent.src.exceptions import SubAgentError
 from deep_agent.src.infrastructure.subagents import VALID_AGENT_TYPES, load_subagents
 
@@ -179,6 +180,7 @@ class TestLoadSubagents:
             # name rather than identity.
             built_tools = mock_sa.call_args.kwargs["tools"]
             assert [t.name for t in built_tools] == ["calculate_bmi", "search_web"]
+            assert all(isinstance(t, CapabilityToolProxy) for t in built_tools)
             assert mock_sa.call_args.kwargs["name"] == "analyst"
             assert mock_sa.call_args.kwargs["model"] == mock_model
             assert mock_sa.call_args.kwargs["description"] == "Analyst"
@@ -972,6 +974,7 @@ class TestGuardianActivationGate:
         # (OFFSEC-384); assert on shape/name rather than identity.
         wrap_call_args = mock_wrap.call_args.args[0]
         assert [t.name for t in wrap_call_args] == [mock_tool.name]
+        assert all(isinstance(t, CapabilityToolProxy) for t in wrap_call_args)
         assert mock_sa_cls.call_args.kwargs["tools"] == [mock_tool]
 
     def test_default_subagent_skips_wrapping_when_config_disabled(self):
@@ -1327,6 +1330,7 @@ class TestMcpResourceToolsOnSubagents:
 
         built_tools = mock_sa.call_args.kwargs["tools"]
         assert [t.name for t in built_tools] == [mock_tool.name, resource_tool.name]
+        assert all(isinstance(t, CapabilityToolProxy) for t in built_tools)
         _no_mcp_resource_tools.assert_called_once_with(
             server_names=None, allowed_uris=None
         )
@@ -1438,6 +1442,7 @@ class TestMcpResourceToolsOnSubagents:
 
         built_tools = mock_sa.call_args.kwargs["tools"]
         assert [t.name for t in built_tools] == [mock_tool.name]
+        assert all(isinstance(t, CapabilityToolProxy) for t in built_tools)
         _no_mcp_resource_tools.assert_called_once_with(
             server_names=None, allowed_uris=None
         )
@@ -1552,6 +1557,7 @@ class TestMcpResourceToolsOnSubagents:
 
         built_tools = mock_create_agent.call_args.kwargs["tools"]
         assert [t.name for t in built_tools] == [mock_tool.name, resource_tool.name]
+        assert all(isinstance(t, CapabilityToolProxy) for t in built_tools)
         _no_mcp_resource_tools.assert_called_once_with(
             server_names=None, allowed_uris=None
         )

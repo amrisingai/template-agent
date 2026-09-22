@@ -112,10 +112,24 @@ class CapabilityToolProxy(BaseTool):
         return await self._inner.ainvoke(input, config, **kwargs)
 
     def _run(self, *args: Any, **kwargs: Any) -> Any:
-        """Sync fallback path; same enforcement as ainvoke."""
+        """Sync fallback path; same enforcement as ainvoke.
+
+        ``BaseTool.run()`` parses the caller's input against the tool's
+        schema and, for a generic ``_run(*args, **kwargs)`` signature like
+        this one, always delivers it as either a single positional value
+        (unstructured tools) or as keyword arguments matching the schema
+        fields (structured tools) -- never both. ``BaseTool.invoke()``
+        expects that same input back as a single ``input`` argument, so it
+        must be reassembled here rather than re-spread with ``*args,
+        **kwargs``, which would try to satisfy ``invoke``'s ``input``
+        parameter from field-named kwargs and raise
+        ``TypeError: missing 1 required positional argument: 'input'`` for
+        every structured (multi-field) tool.
+        """
         if self._denied():
             return CAPABILITY_DENIED_RESULT
-        return self._inner.invoke(*args, **kwargs)
+        tool_input: Any = args[0] if args else kwargs
+        return self._inner.invoke(tool_input)
 
 
 def enforce_capability(tools: list[Any], manifest: CapabilityManifest) -> list[Any]:
