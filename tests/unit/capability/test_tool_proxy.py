@@ -16,6 +16,7 @@ from deep_agent.src.capability.tool_proxy import (
 
 
 def _make_inner_tool(name="my_tool", description="does stuff"):
+    """Build a MagicMock inner tool with a name, description, and no args_schema."""
     tool = MagicMock()
     tool.name = name
     tool.description = description
@@ -24,6 +25,7 @@ def _make_inner_tool(name="my_tool", description="does stuff"):
 
 
 def _manifest(allowed: set[str], agent_name="orchestrator", source=EXPLICIT):
+    """Build a CapabilityManifest authorizing exactly the given tool names."""
     return CapabilityManifest(
         agent_name=agent_name, allowed_tool_names=frozenset(allowed), source=source
     )
@@ -36,14 +38,17 @@ def _manifest(allowed: set[str], agent_name="orchestrator", source=EXPLICIT):
 
 class TestGetToolCallId:
     def test_returns_id_from_dict(self):
+        """Test that _get_tool_call_id extracts the 'id' key from a dict input."""
         assert _get_tool_call_id({"id": "abc-123"}) == "abc-123"
 
     def test_returns_empty_for_non_dict(self):
+        """Test that _get_tool_call_id returns an empty string for non-dict input."""
         assert _get_tool_call_id("nope") == ""
 
 
 class TestMakeDeniedResult:
     def test_returns_error_tool_message(self):
+        """Test that _make_denied_result returns a ToolMessage carrying the denial content."""
         result = _make_denied_result("dangerous_tool", {"id": "call-1"})
         assert isinstance(result, ToolMessage)
         assert result.content == CAPABILITY_DENIED_RESULT
@@ -59,12 +64,14 @@ class TestMakeDeniedResult:
 
 class TestCapabilityToolProxyInit:
     def test_copies_name_and_description(self):
+        """Test that the proxy copies name/description from the inner tool at construction."""
         inner = _make_inner_tool(name="searcher", description="searches stuff")
         proxy = CapabilityToolProxy(inner, _manifest({"searcher"}))
         assert proxy.name == "searcher"
         assert proxy.description == "searches stuff"
 
     def test_stores_inner_tool_and_manifest(self):
+        """Test that the proxy stores a reference to the inner tool and manifest."""
         inner = _make_inner_tool()
         manifest = _manifest({"my_tool"})
         proxy = CapabilityToolProxy(inner, manifest)
@@ -75,6 +82,7 @@ class TestCapabilityToolProxyInit:
 class TestCapabilityToolProxyAinvoke:
     @pytest.mark.asyncio
     async def test_allowed_tool_delegates_to_inner(self):
+        """Test that an allowed tool's ainvoke delegates to the inner tool."""
         inner = _make_inner_tool(name="search")
         safe_result = ToolMessage(content="ok", name="search", tool_call_id="id-1")
         inner.ainvoke = AsyncMock(return_value=safe_result)
@@ -87,6 +95,7 @@ class TestCapabilityToolProxyAinvoke:
 
     @pytest.mark.asyncio
     async def test_disallowed_tool_is_denied_without_calling_inner(self):
+        """Test that a disallowed tool is denied via ainvoke without calling the inner tool."""
         inner = _make_inner_tool(name="delete_everything")
         inner.ainvoke = AsyncMock(return_value="should never be returned")
         proxy = CapabilityToolProxy(inner, _manifest({"search"}))
@@ -105,6 +114,7 @@ class TestCapabilityToolProxyAinvoke:
 
     @pytest.mark.asyncio
     async def test_denial_survives_audit_emit_failure(self):
+        """Test that a denial is still returned even if the audit emitter raises."""
         inner = _make_inner_tool(name="delete_everything")
         inner.ainvoke = AsyncMock()
         proxy = CapabilityToolProxy(inner, _manifest({"search"}))
@@ -121,6 +131,7 @@ class TestCapabilityToolProxyAinvoke:
 
     @pytest.mark.asyncio
     async def test_empty_manifest_denies_every_tool(self):
+        """Test that an empty manifest denies every tool via ainvoke."""
         inner = _make_inner_tool(name="anything")
         inner.ainvoke = AsyncMock()
         proxy = CapabilityToolProxy(inner, _manifest(set()))
@@ -160,6 +171,7 @@ class TestCapabilityToolProxyRun:
         assert result == "sync result"
 
     def test_disallowed_tool_denied_without_calling_inner(self):
+        """Test that a disallowed tool is denied via _run without calling the inner tool."""
         inner = _make_inner_tool(name="delete_everything")
         inner.invoke = MagicMock(return_value="should never be returned")
         proxy = CapabilityToolProxy(inner, _manifest({"search"}))
@@ -177,10 +189,12 @@ class TestCapabilityToolProxyRun:
 
 class TestEnforceCapability:
     def test_returns_unchanged_when_tools_empty(self):
+        """Test that enforce_capability returns the input list unchanged when it's empty."""
         manifest = _manifest({"search"})
         assert enforce_capability([], manifest) == []
 
     def test_wraps_every_tool_with_the_same_manifest(self):
+        """Test that enforce_capability wraps every tool with the same manifest."""
         t1 = _make_inner_tool(name="tool_a")
         t2 = _make_inner_tool(name="tool_b")
         manifest = _manifest({"tool_a", "tool_b"})

@@ -380,6 +380,50 @@ def _build_single_subagent(
     return _build_default_subagent(name, agent_cfg, tools)
 
 
+def _filter_tools_by_mcp_names(
+    tools: list[Any],
+    mcp_names: list[str],
+) -> list[Any]:
+    """Scope an orchestrator-wide MCP tool pool down to one subagent's servers.
+
+    ``tools`` (as passed to ``load_subagents``) is every MCP tool the
+    orchestrator connected to -- not just the servers this particular
+    subagent declared via ``mcps:``. Without this filter, a subagent that
+    declares only server A still receives every tool from every *other*
+    server the orchestrator also happens to use, and
+    ``resolve_capability_manifest``'s implicit-all-mcp grant (when
+    ``tools:`` is omitted) would authorize all of them too -- letting a user
+    or prompt injection invoke tools from servers this subagent never
+    declared (OFFSEC-384 follow-up, CWE-863).
+
+    Only tools carrying ``mcp_server`` metadata (i.e. tools that were
+    actually stamped by ``annotate_mcp_tool`` as belonging to a specific MCP
+    server) are subject to this filter; anything without that metadata is
+    passed through unchanged since it cannot be attributed to an undeclared
+    server in the first place.
+
+    Args:
+        tools: Orchestrator-wide pool of available tools.
+        mcp_names: This subagent's declared (or inherited) ``mcps:`` list.
+
+    Returns:
+        *tools* with any MCP tool whose ``mcp_server`` metadata is not in
+        *mcp_names* removed.
+    """
+    allowed_servers = set(mcp_names or [])
+    filtered: list[Any] = []
+    for tool in tools:
+        metadata = getattr(tool, "metadata", None)
+        if isinstance(metadata, dict) and "mcp_server" in metadata:
+            if metadata["mcp_server"] in allowed_servers:
+                filtered.append(tool)
+            # else: dropped -- belongs to an MCP server this subagent never
+            # declared via `mcps:`.
+        else:
+            filtered.append(tool)
+    return filtered
+
+
 def _resolve_and_enforce_subagent_tools(
     name: str,
     agent_cfg: dict[str, Any],
@@ -407,8 +451,15 @@ def _resolve_and_enforce_subagent_tools(
     tool_names: list[str] | None = agent_cfg.get("tools")
     mcp_names: list[str] = agent_cfg.get("mcps", [])
 
+    # `tools` is the orchestrator-wide pool (every MCP server it connected
+    # to), so it must be scoped down to this subagent's declared servers
+    # *before* manifest resolution -- otherwise the implicit-all-mcp grant
+    # below would authorize tools from servers this subagent never declared
+    # (CWE-863, OFFSEC-384 follow-up).
+    scoped_tools = _filter_tools_by_mcp_names(tools, mcp_names)
+
     resolved_tools, manifest = resolve_capability_manifest(
-        tool_names, tools, mcp_names, agent_name=name
+        tool_names, scoped_tools, mcp_names, agent_name=name
     )
 
     resource_tools = wrap_mcp_tools_for_auth(

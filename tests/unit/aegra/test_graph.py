@@ -14,6 +14,7 @@ if "langgraph_sdk.runtime" not in sys.modules:
 
 
 def _reset_graph_state() -> None:
+    """Reset module-level graph caches between tests."""
     from deep_agent.aegra import graph
 
     graph._graph_cache.clear()
@@ -32,6 +33,7 @@ class TestAgentFactory:
 
     @pytest.fixture(autouse=True)
     def _no_guardian_wrapping(self):
+        """Disable Guardian/PII wrapping so tests can assert on the raw compiled graph."""
         mock_settings = MagicMock()
         mock_settings.GUARDIAN_API_BASE = ""
         mock_settings.LIFECYCLE_PERSISTENCE_ENABLED = False
@@ -49,6 +51,7 @@ class TestAgentFactory:
 
     @pytest.mark.asyncio
     async def test_builds_agent_without_user(self):
+        """Test that agent() builds a compiled graph when no user is present on the runtime."""
         mock_compiled = MagicMock()
         mock_config = MagicMock()
         mock_config.get_orchestrator_config.return_value = {
@@ -124,6 +127,7 @@ class TestAgentFactory:
 
     @pytest.mark.asyncio
     async def test_builds_agent_with_sso_token(self):
+        """Test that agent() builds a compiled graph when an SSO token is present."""
         mock_compiled = MagicMock()
         mock_config = MagicMock()
         mock_config.get_orchestrator_config.return_value = {
@@ -212,6 +216,7 @@ class TestAgentFactory:
 
     @pytest.mark.asyncio
     async def test_exposes_all_mcp_tools_when_mcps_declared_without_tool_list(self):
+        """Test that omitting 'tools:' with declared 'mcps:' grants every tool those servers expose."""
         mock_compiled = MagicMock()
         mock_config = MagicMock()
         mock_config.get_orchestrator_config.return_value = {
@@ -436,7 +441,8 @@ class TestAgentFactory:
 
         # Give the mock a real signature that includes interrupt_on so that the
         # inspect.signature() check inside agent() sees the parameter.
-        def _stub(*, interrupt_on=None, **kw): ...
+        def _stub(*, interrupt_on=None, **kw):
+            """Stub with a real `interrupt_on` signature so inspect.signature() sees it."""
 
         mock_create = MagicMock(return_value=mock_compiled)
         mock_create.__signature__ = inspect.signature(_stub)
@@ -531,7 +537,8 @@ class TestAgentFactory:
         mock_runtime = MagicMock()
         mock_runtime.user = None
 
-        def _stub(*, interrupt_on=None, **kw): ...
+        def _stub(*, interrupt_on=None, **kw):
+            """Stub with a real `interrupt_on` signature so inspect.signature() sees it."""
 
         mock_create = MagicMock(return_value=mock_compiled)
         mock_create.__signature__ = inspect.signature(_stub)
@@ -599,6 +606,7 @@ class TestGraphHelpers:
     """Tests for pure helper functions in deep_agent.aegra.graph."""
 
     def test_graph_fingerprint_is_deterministic(self):
+        """Test that _graph_fingerprint is deterministic for identical inputs."""
         from deep_agent.aegra.graph import _graph_fingerprint
 
         result1 = _graph_fingerprint("model", "prompt", ["tool1", "tool2"])
@@ -606,6 +614,7 @@ class TestGraphHelpers:
         assert result1 == result2
 
     def test_graph_fingerprint_differs_for_different_inputs(self):
+        """Test that _graph_fingerprint differs when any input differs."""
         from deep_agent.aegra.graph import _graph_fingerprint
 
         fp1 = _graph_fingerprint("model-a", "prompt", ["tool1"])
@@ -613,6 +622,7 @@ class TestGraphHelpers:
         assert fp1 != fp2
 
     def test_graph_fingerprint_tool_order_independent(self):
+        """Test that _graph_fingerprint is independent of tool ordering."""
         from deep_agent.aegra.graph import _graph_fingerprint
 
         fp1 = _graph_fingerprint("model", "prompt", ["a", "b"])
@@ -620,6 +630,7 @@ class TestGraphHelpers:
         assert fp1 == fp2
 
     def test_graph_fingerprint_includes_mcps_and_resources(self):
+        """Test that _graph_fingerprint reflects declared MCP names and resource URIs."""
         from deep_agent.aegra.graph import _graph_fingerprint
 
         base = dict(model_name="model", system_prompt="prompt", tool_names=["t"])
@@ -641,6 +652,7 @@ class TestGraphHelpers:
         assert fp_resources_order == fp_resources_order_rev
 
     def test_invalidate_graph_cache_clears_caches(self):
+        """Test that invalidate_graph_cache() clears both the graph and timestamp caches."""
         import time
 
         from deep_agent.aegra import graph
@@ -655,6 +667,7 @@ class TestGraphHelpers:
         assert len(graph._graph_cache_ts) == 0
 
     def test_append_safety_stop_instruction_appends_text(self):
+        """Test that _append_safety_stop_instruction appends the STOP ALL WORK text."""
         from deep_agent.aegra.graph import _append_safety_stop_instruction
 
         result = _append_safety_stop_instruction("base prompt")
@@ -667,6 +680,7 @@ class TestGraphCacheHit:
 
     @pytest.mark.asyncio
     async def test_returns_cached_graph_on_hit(self):
+        """Test that agent() returns the cached graph without rebuilding on a cache hit."""
         import time
 
         from deep_agent.aegra import graph
@@ -749,6 +763,7 @@ class TestGraphCacheHit:
         mock_create.assert_not_called()
 
     def _mock_orch_config(self, **orch_overrides):
+        """Build a mock orchestrator config, applying any frontmatter overrides."""
         mock_config = MagicMock()
         orch = {
             "name": "orchestrator",
@@ -767,6 +782,7 @@ class TestGraphCacheHit:
         return mock_config
 
     async def _build_agent(self, mock_config):
+        """Build a compiled agent graph under mocked dependencies and return the key mocks."""
         mock_compiled = MagicMock()
         mock_runtime = MagicMock()
         mock_runtime.user = None
@@ -834,6 +850,7 @@ class TestGraphCacheHit:
 
     @pytest.mark.asyncio
     async def test_attaches_resource_tools_when_mcp_enabled(self):
+        """Test that MCP resource-read tools are attached when the resource server is enabled."""
         from deep_agent.aegra.mcp_resource_tools import (
             LIST_TOOL,
             READ_TOOL,
@@ -864,6 +881,7 @@ class TestGraphCacheHit:
 
     @pytest.mark.asyncio
     async def test_resources_empty_list_allows_all(self):
+        """Test that an explicit empty 'resources:' list allows every resource URI."""
         mock_config = self._mock_orch_config(resources=[])
         mock_config.get_mcp_servers.return_value = {
             "template-mcp-server": {"enabled": True},
@@ -880,6 +898,7 @@ class TestGraphCacheHit:
 
     @pytest.mark.asyncio
     async def test_resource_tools_honor_declared_mcps(self):
+        """Test that resource tools are scoped to the orchestrator's declared 'mcps:'."""
         mock_config = self._mock_orch_config(mcps=["keep-me"])
         mock_config.get_mcp_servers.return_value = {
             "keep-me": {"enabled": True},
@@ -898,6 +917,7 @@ class TestGraphCacheHit:
 
     @pytest.mark.asyncio
     async def test_resource_tools_honor_declared_resources(self):
+        """Test that resource tools are scoped to the orchestrator's declared 'resources:'."""
         mock_config = self._mock_orch_config(
             resources=["template://about", "template://echo/{text}"]
         )
@@ -922,6 +942,7 @@ class TestGuardianActivationGate:
     """Guardian wrapping requires BOTH guardrail config.enabled AND GUARDIAN_API_BASE."""
 
     def _build_mock_config(self, guardrails_enabled: bool) -> MagicMock:
+        """Build a mock orchestrator config with a configurable guardrails.enabled flag."""
         mock_config = MagicMock()
         mock_config.get_orchestrator_config.return_value = {
             "name": "orchestrator",
@@ -940,6 +961,7 @@ class TestGuardianActivationGate:
         return mock_config
 
     def _base_patches(self, mock_config, mock_settings):
+        """Return the common patch list shared by the Guardian activation-gate tests."""
         return [
             patch("deep_agent.src.agent.config.agent_config", mock_config),
             patch("deep_agent.src.settings.settings", mock_settings),
