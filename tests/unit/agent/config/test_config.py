@@ -511,3 +511,75 @@ Researcher prompt.
         assert "analyst" in subs
         assert all("unsafe-skill" not in p for p in orchestrator["skill_paths"])
         assert all("unsafe-skill" not in p for p in subs["analyst"]["skill_paths"])
+
+
+class TestCatalogueScanFingerprints:
+    """Tests for AgentConfig's per-name content fingerprint store (OFFSEC-379).
+
+    These back the incremental rescan in catalogue_safety.py — see
+    tests/unit/agent/config/test_catalogue_safety.py for the scan-level
+    behavior built on top of these accessors.
+    """
+
+    def setup_method(self):
+        AgentConfig._instance = None
+
+    def _make_config_dir(self, tmp_path):
+        config_dir = tmp_path / "agent_config"
+        config_dir.mkdir()
+        (config_dir / "PROMPT.md").write_text(
+            "---\nname: orchestrator\nmodel: gemini-2.5-flash\n---\n\nPrompt.\n"
+        )
+        return config_dir
+
+    def test_subagent_fingerprint_defaults_to_none(self, tmp_path):
+        cfg = AgentConfig(self._make_config_dir(tmp_path))
+        assert cfg.get_subagent_scan_fingerprint("unseen") is None
+
+    def test_skill_fingerprint_defaults_to_none(self, tmp_path):
+        cfg = AgentConfig(self._make_config_dir(tmp_path))
+        assert cfg.get_skill_scan_fingerprint("unseen") is None
+
+    def test_set_then_get_subagent_fingerprint_round_trips(self, tmp_path):
+        cfg = AgentConfig(self._make_config_dir(tmp_path))
+        cfg.set_subagent_scan_fingerprint("analyst", "abc123")
+        assert cfg.get_subagent_scan_fingerprint("analyst") == "abc123"
+        # Unrelated names remain unaffected.
+        assert cfg.get_subagent_scan_fingerprint("other") is None
+
+    def test_set_then_get_skill_fingerprint_round_trips(self, tmp_path):
+        cfg = AgentConfig(self._make_config_dir(tmp_path))
+        cfg.set_skill_scan_fingerprint("safe-skill", "def456")
+        assert cfg.get_skill_scan_fingerprint("safe-skill") == "def456"
+        assert cfg.get_skill_scan_fingerprint("other") is None
+
+    def test_fingerprints_survive_config_auto_reload(self, tmp_path):
+        """Fingerprints must persist across CONFIG_AUTO_RELOAD reloads —
+        they're process-lifetime state on AgentConfig, not reloaded from disk.
+        """
+        cfg = AgentConfig(self._make_config_dir(tmp_path))
+        cfg.set_subagent_scan_fingerprint("analyst", "abc123")
+
+        with patch("deep_agent.src.agent.config.loader.settings") as mock_settings:
+            mock_settings.CONFIG_AUTO_RELOAD = True
+            cfg.get_orchestrator_config()  # forces a reload from disk
+
+        assert cfg.get_subagent_scan_fingerprint("analyst") == "abc123"
+
+    def test_exclude_subagent_clears_its_recorded_fingerprint(self, tmp_path):
+        """Once excluded, a subagent's fingerprint is dropped — if a future
+        reload re-adds a name with identical (already-flagged-unsafe)
+        content, it must not be mistaken for 'already scanned safe'.
+        """
+        config_dir = self._make_config_dir(tmp_path)
+        subagents_dir = config_dir / "subagents"
+        subagents_dir.mkdir()
+        (subagents_dir / "hostile.md").write_text(
+            "---\nname: hostile\nmodel: gemini-2.5-flash\n---\n\nBody.\n"
+        )
+        cfg = AgentConfig(config_dir)
+        cfg.set_subagent_scan_fingerprint("hostile", "some-fingerprint")
+
+        cfg.exclude_subagent("hostile", reason="flagged unsafe")
+
+        assert cfg.get_subagent_scan_fingerprint("hostile") is None

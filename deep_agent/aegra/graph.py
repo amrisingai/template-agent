@@ -256,12 +256,29 @@ async def agent(runtime: ServerRuntime) -> Any:
     from deep_agent.aegra.mcp_resource_tools import get_mcp_resource_tools
     from deep_agent.aegra.mcp_tool_auth import wrap_mcp_tools_for_auth
     from deep_agent.src.agent.config import agent_config
+    from deep_agent.src.agent.config.catalogue_safety import (
+        ensure_catalogue_safety_scanned,
+    )
     from deep_agent.src.infrastructure.async_tasks import build_async_middleware
     from deep_agent.src.infrastructure.backend import get_configured_backend
     from deep_agent.src.infrastructure.providers import (
         register_profiles_from_config,
     )
     from deep_agent.src.infrastructure.subagents import load_subagents
+
+    # Aegra invokes this factory per-request (see module docstring; verified
+    # against aegra_api.services.langgraph_service, which calls
+    # invoke_factory() fresh for every "threads.create_run" access —
+    # confirmed empirically, not assumed). CONFIG_AUTO_RELOAD (default true)
+    # means agent_config's getters below will reload subagent/skill content
+    # from disk on this request; run the incremental catalogue safety
+    # rescan now, before any of that reloaded content is read, so newly
+    # added/modified subagents or skills are excluded before they can reach
+    # graph construction (OFFSEC-379). Excluded names stick across the
+    # additional reloads triggered by the getters below
+    # (AgentConfig._reapply_exclusions), so ordering only needs to guarantee
+    # this runs first, not that no further reload happens afterward.
+    await ensure_catalogue_safety_scanned(agent_config)
 
     user = getattr(runtime, "user", None)
     sso_token = getattr(user, "access_token", None) if user else None

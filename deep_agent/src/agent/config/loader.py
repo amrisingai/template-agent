@@ -125,6 +125,8 @@ class AgentConfig:
     _name: str
     _excluded_subagents: set[str]
     _excluded_skills: set[str]
+    _subagent_scan_fingerprints: dict[str, str]
+    _skill_scan_fingerprints: dict[str, str]
 
     def __new__(cls, base_dir: Path | None = None) -> "AgentConfig":
         """Create or return the singleton instance.
@@ -156,6 +158,14 @@ class AgentConfig:
         # Sticky for the process lifetime — see _reapply_exclusions().
         self._excluded_subagents: set[str] = set()
         self._excluded_skills: set[str] = set()
+        # Content fingerprints (see catalogue_safety._content_fingerprint) of
+        # the last successfully-scanned-safe version of each subagent/skill,
+        # keyed by name. Sticky for the process lifetime so a rescan after a
+        # CONFIG_AUTO_RELOAD reload can tell unchanged content (skip
+        # Guardian) apart from new/modified content (must be rescanned) —
+        # see catalogue_safety.ensure_catalogue_safety_scanned (OFFSEC-379).
+        self._subagent_scan_fingerprints: dict[str, str] = {}
+        self._skill_scan_fingerprints: dict[str, str] = {}
 
     def _load_agent_yaml(self) -> dict[str, Any]:
         """Load the unified runtime/agent.yaml once.
@@ -667,6 +677,10 @@ class AgentConfig:
         self._ensure_loaded()
         self._excluded_subagents.add(name)
         removed = self._subagents.pop(name, None) is not None
+        # Drop any previously-recorded "scanned safe" fingerprint — if this
+        # name is ever seen again its content must be treated as unverified,
+        # not silently matched against a stale fingerprint (OFFSEC-379).
+        self._subagent_scan_fingerprints.pop(name, None)
         if removed:
             logger.warning(
                 "Excluded subagent '%s' from agent config%s",
@@ -694,6 +708,9 @@ class AgentConfig:
         self._ensure_loaded()
         self._excluded_skills.add(name)
         removed = self._available_skills.pop(name, None) is not None
+        # Drop any previously-recorded "scanned safe" fingerprint — see the
+        # matching comment in exclude_subagent.
+        self._skill_scan_fingerprints.pop(name, None)
         if removed:
             self._scrub_skill_path(name)
             logger.warning(
@@ -702,6 +719,48 @@ class AgentConfig:
                 f": {reason}" if reason else "",
             )
         return removed
+
+    def get_subagent_scan_fingerprint(self, name: str) -> str | None:
+        """Get the content fingerprint of the last successful safety scan for a subagent.
+
+        Args:
+            name: Subagent name (config key).
+
+        Returns:
+            The stored fingerprint, or None if this subagent has never been
+            successfully scanned (e.g. brand new, or previously excluded).
+        """
+        return self._subagent_scan_fingerprints.get(name)
+
+    def set_subagent_scan_fingerprint(self, name: str, fingerprint: str) -> None:
+        """Record the content fingerprint of a subagent's last successful safety scan.
+
+        Args:
+            name: Subagent name (config key).
+            fingerprint: Content fingerprint (see catalogue_safety._content_fingerprint).
+        """
+        self._subagent_scan_fingerprints[name] = fingerprint
+
+    def get_skill_scan_fingerprint(self, name: str) -> str | None:
+        """Get the content fingerprint of the last successful safety scan for a skill.
+
+        Args:
+            name: Skill name (directory name).
+
+        Returns:
+            The stored fingerprint, or None if this skill has never been
+            successfully scanned (e.g. brand new, or previously excluded).
+        """
+        return self._skill_scan_fingerprints.get(name)
+
+    def set_skill_scan_fingerprint(self, name: str, fingerprint: str) -> None:
+        """Record the content fingerprint of a skill's last successful safety scan.
+
+        Args:
+            name: Skill name (directory name).
+            fingerprint: Content fingerprint (see catalogue_safety._content_fingerprint).
+        """
+        self._skill_scan_fingerprints[name] = fingerprint
 
     def _scrub_skill_path(self, name: str) -> None:
         """Remove a skill's resolved path from every already-resolved skill_paths list."""
