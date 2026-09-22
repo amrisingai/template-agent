@@ -380,22 +380,47 @@ def _build_single_subagent(
     return _build_default_subagent(name, agent_cfg, tools)
 
 
-def _append_mcp_resource_tools(
-    resolved_tools: list[Any], agent_cfg: dict[str, Any]
+def _resolve_and_enforce_subagent_tools(
+    name: str,
+    agent_cfg: dict[str, Any],
+    tools: list[Any],
 ) -> list[Any]:
-    """Append host resource tools using this subagent's mcps/resources allowlists."""
+    """Resolve, manifest-authorize, and enforce this subagent's tool set.
+
+    Builds the enforced capability manifest (OFFSEC-384) from the subagent's
+    declared ``tools:``/``mcps:``, adds its MCP resource-read tools (which
+    carry their own per-call URI allowlist via ``resources:``), then wraps
+    the combined set with the dispatch-time capability gate so every tool
+    call -- regardless of which of these sources it came from -- is checked
+    independent of the model's context.
+    """
     from deep_agent.aegra.mcp_resource_tools import get_mcp_resource_tools
     from deep_agent.aegra.mcp_tool_auth import wrap_mcp_tools_for_auth
+    from deep_agent.src.capability import (
+        enforce_capability,
+        resolve_capability_manifest,
+    )
 
-    extra = wrap_mcp_tools_for_auth(
+    tool_names: list[str] = agent_cfg.get("tools", [])
+    mcp_names: list[str] = agent_cfg.get("mcps", [])
+
+    resolved_tools, manifest = resolve_capability_manifest(
+        tool_names, tools, mcp_names, agent_name=name
+    )
+
+    resource_tools = wrap_mcp_tools_for_auth(
         get_mcp_resource_tools(
             server_names=agent_cfg.get("mcps") or None,
             allowed_uris=agent_cfg.get("resources") or None,
         )
     )
-    if not extra:
-        return resolved_tools
-    return [*resolved_tools, *extra]
+    if resource_tools:
+        manifest = manifest.merged_with(t.name for t in resource_tools)
+        resolved_tools = [*resolved_tools, *resource_tools]
+
+    # Dispatch-time gate: every tool call is checked against the manifest
+    # above, independent of the model's context (OFFSEC-384).
+    return enforce_capability(resolved_tools, manifest)
 
 
 def _build_default_subagent(
@@ -414,26 +439,9 @@ def _build_default_subagent(
         "Subagent '%s' [default] using model: %s", name, _format_model_log(spec)
     )
 
-    tool_names: list[str] = agent_cfg.get("tools", [])
-    mcp_names: list[str] = agent_cfg.get("mcps", [])
-
-    if tool_names:
-        resolved_tools: list[Any] = agent_config.resolve_tools(
-            tool_names, tools, agent_name=name
-        )
-    elif mcp_names and tools:
-        logger.info(
-            "Subagent '%s' declared MCP servers %s but no explicit tools; "
-            "exposing all %d available MCP tool(s)",
-            name,
-            mcp_names,
-            len(tools),
-        )
-        resolved_tools = list(tools)
-    else:
-        resolved_tools = []
-
-    resolved_tools = _append_mcp_resource_tools(resolved_tools, agent_cfg)
+    resolved_tools: list[Any] = _resolve_and_enforce_subagent_tools(
+        name, agent_cfg, tools
+    )
 
     skill_paths: list[str] = agent_cfg.get("skill_paths", [])
 
@@ -493,25 +501,9 @@ def _build_compiled_subagent(
         "Subagent '%s' [compiled] using model: %s", name, _format_model_log(spec)
     )
 
-    tool_names: list[str] = agent_cfg.get("tools", [])
-    mcp_names: list[str] = agent_cfg.get("mcps", [])
-
-    if tool_names:
-        resolved_tools: list[Any] = agent_config.resolve_tools(
-            tool_names, tools, agent_name=name
-        )
-    elif mcp_names and tools:
-        logger.info(
-            "Subagent '%s' [compiled] declared MCP servers %s but no explicit tools; "
-            "exposing all %d available MCP tool(s)",
-            name,
-            mcp_names,
-            len(tools),
-        )
-        resolved_tools = list(tools)
-    else:
-        resolved_tools = []
-    resolved_tools = _append_mcp_resource_tools(resolved_tools, agent_cfg)
+    resolved_tools: list[Any] = _resolve_and_enforce_subagent_tools(
+        name, agent_cfg, tools
+    )
     skill_paths: list[str] = agent_cfg.get("skill_paths", [])
 
     # Build fallback middleware if spec has fallback configured

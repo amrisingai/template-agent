@@ -118,7 +118,13 @@ class TestLoadSubagents:
     def test_load_subagent_with_tools(self):
         """Test loading subagent with tools that get resolved."""
         mock_tool1 = MagicMock()
+        mock_tool1.name = "calculate_bmi"
+        mock_tool1.description = "Calculates BMI"
+        mock_tool1.args_schema = None
         mock_tool2 = MagicMock()
+        mock_tool2.name = "search_web"
+        mock_tool2.description = "Searches the web"
+        mock_tool2.args_schema = None
         mock_model = MagicMock()
         mock_subagent = MagicMock()
 
@@ -169,13 +175,14 @@ class TestLoadSubagents:
             mock_resolve_tools.assert_called_once_with(
                 ["calculate_bmi", "search_web"], available_tools, agent_name="analyst"
             )
-            mock_sa.assert_called_once_with(
-                name="analyst",
-                model=mock_model,
-                description="Analyst",
-                system_prompt="Prompt",
-                tools=[mock_tool1, mock_tool2],
-            )
+            # Tools are wrapped by CapabilityToolProxy (OFFSEC-384); compare by
+            # name rather than identity.
+            built_tools = mock_sa.call_args.kwargs["tools"]
+            assert [t.name for t in built_tools] == ["calculate_bmi", "search_web"]
+            assert mock_sa.call_args.kwargs["name"] == "analyst"
+            assert mock_sa.call_args.kwargs["model"] == mock_model
+            assert mock_sa.call_args.kwargs["description"] == "Analyst"
+            assert mock_sa.call_args.kwargs["system_prompt"] == "Prompt"
 
     def test_load_subagent_with_skills(self):
         """Test loading subagent with pre-resolved skill paths."""
@@ -907,6 +914,9 @@ class TestGuardianActivationGate:
     def test_default_subagent_wraps_tools_when_guardian_active(self):
         """Both enabled=True and GUARDIAN_API_BASE set → wrap_tools called."""
         mock_tool = MagicMock()
+        mock_tool.name = "t"
+        mock_tool.description = "A tool"
+        mock_tool.args_schema = None
         mock_settings = MagicMock()
         mock_settings.GUARDIAN_API_BASE = "http://guardian.internal"
 
@@ -958,12 +968,18 @@ class TestGuardianActivationGate:
         ):
             load_subagents(tools=[mock_tool])
 
-        mock_wrap.assert_called_once_with([mock_tool])
+        # The tool passed to wrap_tools is wrapped by CapabilityToolProxy
+        # (OFFSEC-384); assert on shape/name rather than identity.
+        wrap_call_args = mock_wrap.call_args.args[0]
+        assert [t.name for t in wrap_call_args] == [mock_tool.name]
         assert mock_sa_cls.call_args.kwargs["tools"] == [mock_tool]
 
     def test_default_subagent_skips_wrapping_when_config_disabled(self):
         """enabled=False + GUARDIAN_API_BASE set → wrap_tools not called."""
         mock_tool = MagicMock()
+        mock_tool.name = "t"
+        mock_tool.description = "A tool"
+        mock_tool.args_schema = None
         mock_settings = MagicMock()
         mock_settings.GUARDIAN_API_BASE = "http://guardian.internal"
 
@@ -1017,6 +1033,9 @@ class TestGuardianActivationGate:
     def test_default_subagent_skips_wrapping_when_api_base_absent(self):
         """enabled=True + no GUARDIAN_API_BASE → wrap_tools not called."""
         mock_tool = MagicMock()
+        mock_tool.name = "t"
+        mock_tool.description = "A tool"
+        mock_tool.args_schema = None
         mock_settings = MagicMock()
         mock_settings.GUARDIAN_API_BASE = ""
 
@@ -1255,8 +1274,13 @@ class TestMcpResourceToolsOnSubagents:
     ):
         resource_tool = MagicMock()
         resource_tool.name = "mcp_list_resources"
+        resource_tool.description = "Lists MCP resources"
+        resource_tool.args_schema = None
         _no_mcp_resource_tools.return_value = [resource_tool]
         mock_tool = MagicMock()
+        mock_tool.name = "calculate_bmi"
+        mock_tool.description = "Calculates BMI"
+        mock_tool.args_schema = None
         mock_settings = MagicMock()
         mock_settings.GUARDIAN_API_BASE = ""
 
@@ -1301,7 +1325,8 @@ class TestMcpResourceToolsOnSubagents:
         ):
             load_subagents(tools=[mock_tool])
 
-        assert mock_sa.call_args.kwargs["tools"] == [mock_tool, resource_tool]
+        built_tools = mock_sa.call_args.kwargs["tools"]
+        assert [t.name for t in built_tools] == [mock_tool.name, resource_tool.name]
         _no_mcp_resource_tools.assert_called_once_with(
             server_names=None, allowed_uris=None
         )
@@ -1309,6 +1334,10 @@ class TestMcpResourceToolsOnSubagents:
     def test_default_passes_agent_mcps_and_resources(self, _no_mcp_resource_tools):
         mock_settings = MagicMock()
         mock_settings.GUARDIAN_API_BASE = ""
+        mock_tool = MagicMock()
+        mock_tool.name = "calculate_bmi"
+        mock_tool.description = "Calculates BMI"
+        mock_tool.args_schema = None
 
         with (
             patch(
@@ -1331,7 +1360,7 @@ class TestMcpResourceToolsOnSubagents:
             ),
             patch(
                 "deep_agent.src.infrastructure.subagents.agent_config.resolve_tools",
-                return_value=[MagicMock()],
+                return_value=[mock_tool],
             ),
             patch(
                 "deep_agent.src.infrastructure.subagents.get_or_create_model_from_spec",
@@ -1359,6 +1388,9 @@ class TestMcpResourceToolsOnSubagents:
 
     def test_default_resources_empty_allows_all(self, _no_mcp_resource_tools):
         mock_tool = MagicMock()
+        mock_tool.name = "calculate_bmi"
+        mock_tool.description = "Calculates BMI"
+        mock_tool.args_schema = None
         mock_settings = MagicMock()
         mock_settings.GUARDIAN_API_BASE = ""
 
@@ -1404,7 +1436,8 @@ class TestMcpResourceToolsOnSubagents:
         ):
             load_subagents(tools=[mock_tool])
 
-        assert mock_sa.call_args.kwargs["tools"] == [mock_tool]
+        built_tools = mock_sa.call_args.kwargs["tools"]
+        assert [t.name for t in built_tools] == [mock_tool.name]
         _no_mcp_resource_tools.assert_called_once_with(
             server_names=None, allowed_uris=None
         )
@@ -1412,6 +1445,10 @@ class TestMcpResourceToolsOnSubagents:
     def test_default_inherits_orchestrator_resources(self, _no_mcp_resource_tools):
         mock_settings = MagicMock()
         mock_settings.GUARDIAN_API_BASE = ""
+        mock_tool = MagicMock()
+        mock_tool.name = "calculate_bmi"
+        mock_tool.description = "Calculates BMI"
+        mock_tool.args_schema = None
 
         with (
             patch(
@@ -1432,7 +1469,7 @@ class TestMcpResourceToolsOnSubagents:
             ),
             patch(
                 "deep_agent.src.infrastructure.subagents.agent_config.resolve_tools",
-                return_value=[MagicMock()],
+                return_value=[mock_tool],
             ),
             patch(
                 "deep_agent.src.infrastructure.subagents.get_or_create_model_from_spec",
@@ -1463,8 +1500,13 @@ class TestMcpResourceToolsOnSubagents:
     ):
         resource_tool = MagicMock()
         resource_tool.name = "mcp_list_resources"
+        resource_tool.description = "Lists MCP resources"
+        resource_tool.args_schema = None
         _no_mcp_resource_tools.return_value = [resource_tool]
         mock_tool = MagicMock()
+        mock_tool.name = "calculate_bmi"
+        mock_tool.description = "Calculates BMI"
+        mock_tool.args_schema = None
         mock_settings = MagicMock()
         mock_settings.GUARDIAN_API_BASE = ""
 
@@ -1508,10 +1550,8 @@ class TestMcpResourceToolsOnSubagents:
         ):
             load_subagents(tools=[mock_tool])
 
-        assert mock_create_agent.call_args.kwargs["tools"] == [
-            mock_tool,
-            resource_tool,
-        ]
+        built_tools = mock_create_agent.call_args.kwargs["tools"]
+        assert [t.name for t in built_tools] == [mock_tool.name, resource_tool.name]
         _no_mcp_resource_tools.assert_called_once_with(
             server_names=None, allowed_uris=None
         )

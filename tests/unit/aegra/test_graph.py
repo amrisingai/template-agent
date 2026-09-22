@@ -227,6 +227,8 @@ class TestAgentFactory:
 
         mock_tool = MagicMock()
         mock_tool.name = "identify_dataproducts"
+        mock_tool.description = "Identifies data products"
+        mock_tool.args_schema = None
 
         mock_runtime = MagicMock()
         mock_runtime.user = None
@@ -289,7 +291,10 @@ class TestAgentFactory:
             result = await agent(mock_runtime)
 
         assert result is mock_compiled
-        assert mock_create.call_args.kwargs["tools"] == [mock_tool]
+        built_tools = mock_create.call_args.kwargs["tools"]
+        # Tools are wrapped by CapabilityToolProxy (OFFSEC-384); compare by
+        # name rather than identity.
+        assert [t.name for t in built_tools] == [mock_tool.name]
         mock_get_mcp.assert_awaited_once_with(
             sso_token=None, server_names=["dataverse-mcp-prod1"], user_id=None
         )
