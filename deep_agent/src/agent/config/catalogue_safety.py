@@ -156,10 +156,44 @@ async def _scan_subagents(
             check=failed_check,
             verdict=verdict,
         )
-        config.exclude_subagent(name, reason=f"{failed_check} check flagged: {verdict}")
+        # exclude_subagent() calls AgentConfig._ensure_loaded() internally,
+        # which — under CONFIG_AUTO_RELOAD — performs a full synchronous
+        # reload from disk (re-reading/parsing every subagent .md and
+        # SKILL.md file), not just a dict pop. Offload it so a single
+        # flagged entry doesn't block the event loop for other in-flight
+        # requests (OFFSEC-379).
+        await asyncio.to_thread(
+            config.exclude_subagent,
+            name,
+            reason=f"{failed_check} check flagged: {verdict}",
+        )
         excluded.append(name)
 
     return excluded
+
+
+def _read_skill_frontmatter(skill_md: Path) -> dict[str, Any] | None:
+    """Sync helper for ``_scan_skills``: read+parse one ``SKILL.md`` off the event loop.
+
+    Bundles the ``Path.is_file()`` check and ``parse_frontmatter()`` read into
+    a single synchronous unit so ``_scan_skills`` can offload both with one
+    ``asyncio.to_thread`` call per skill instead of two (OFFSEC-379).
+
+    Args:
+        skill_md: Path to the skill's ``SKILL.md`` file.
+
+    Returns:
+        The parsed frontmatter dict, or ``None`` if *skill_md* doesn't exist
+        (nothing to scan — the existing skill loading path already tolerates
+        this).
+
+    Raises:
+        Exception: Whatever ``parse_frontmatter`` raises on malformed content;
+            propagated unchanged to the caller.
+    """
+    if not skill_md.is_file():
+        return None
+    return parse_frontmatter(skill_md)
 
 
 async def _scan_skills(
@@ -185,13 +219,14 @@ async def _scan_skills(
 
     for name, path in list(available_skills.items()):
         skill_md = path / "SKILL.md"
-        if not skill_md.is_file():
-            # Nothing to scan (e.g. malformed/empty skill dir) — leave as-is,
-            # the existing skill loading path already tolerates this.
-            continue
-
         try:
-            skill_cfg: dict[str, Any] = parse_frontmatter(skill_md)
+            # Path.is_file() and reading/parsing SKILL.md are both
+            # synchronous filesystem calls — offload them to a worker thread
+            # so a large/slow catalogue doesn't block the event loop for
+            # other in-flight requests (OFFSEC-379).
+            skill_cfg: dict[str, Any] | None = await asyncio.to_thread(
+                _read_skill_frontmatter, skill_md
+            )
         except Exception as exc:
             # Fail closed: a SKILL.md that can't be parsed can't be scanned,
             # but the directory-based skill index (_scan_available_skills)
@@ -205,8 +240,15 @@ async def _scan_skills(
                 name=name,
                 error=str(exc),
             )
-            config.exclude_skill(name, reason=f"SKILL.md failed to parse: {exc}")
+            await asyncio.to_thread(
+                config.exclude_skill, name, reason=f"SKILL.md failed to parse: {exc}"
+            )
             excluded.append(name)
+            continue
+
+        if skill_cfg is None:
+            # Nothing to scan (e.g. malformed/empty skill dir) — leave as-is,
+            # the existing skill loading path already tolerates this.
             continue
 
         text = "\n\n".join(
@@ -233,7 +275,15 @@ async def _scan_skills(
             check=failed_check,
             verdict=verdict,
         )
-        config.exclude_skill(name, reason=f"{failed_check} check flagged: {verdict}")
+        # exclude_skill() calls AgentConfig._ensure_loaded() internally,
+        # which — under CONFIG_AUTO_RELOAD — performs a full synchronous
+        # reload from disk. Offload it, same as exclude_subagent() above
+        # (OFFSEC-379).
+        await asyncio.to_thread(
+            config.exclude_skill,
+            name,
+            reason=f"{failed_check} check flagged: {verdict}",
+        )
         excluded.append(name)
 
     return excluded
@@ -262,7 +312,13 @@ async def scan_catalogue_safety(config: "AgentConfig") -> dict[str, list[str]]:
         logger.info("catalogue_safety_scan_skipped", reason="guardrails_disabled")
         return {"subagents_excluded": [], "skills_excluded": []}
 
-    subagent_configs, available_skills = config.get_catalogue_snapshot()
+    # Offloaded to a worker thread — same reasoning as the equivalent call in
+    # ensure_catalogue_safety_scanned: this reads/parses every subagent .md
+    # and SKILL.md file from disk and would otherwise block the startup
+    # event loop for the duration of that I/O (OFFSEC-379).
+    subagent_configs, available_skills = await asyncio.to_thread(
+        config.get_catalogue_snapshot
+    )
     subagents_excluded = await _scan_subagents(config, subagent_configs)
     skills_excluded = await _scan_skills(config, available_skills)
 
@@ -320,7 +376,19 @@ async def ensure_catalogue_safety_scanned(
     3. Excludes (``exclude_subagent`` / ``exclude_skill``, same sticky
        mechanism as the startup scan) anything newly flagged, before
        returning — so the caller's subsequent reads of subagent/skill
-       config already reflect the exclusion.
+       config already reflect the exclusion. For an excluded skill, also
+       scrubs its resolved directory path out of every subagent's
+       ``skill_paths`` in the *pinned* ``subagent_configs`` snapshot being
+       returned (not just out of ``available_skills``) — each subagent's
+       ``skill_paths`` was already resolved/baked in eagerly at config-load
+       time (``AgentConfig._load_all_subagents``), and
+       ``load_subagents()`` reads that pre-baked list directly rather than
+       re-resolving it from ``available_skills`` per subagent. Without this,
+       a flagged skill's path would still reach the subagent skill loader
+       through this snapshot even though ``available_skills`` no longer
+       lists it (OFFSEC-379, CWE-74). ``AgentConfig.exclude_skill``'s own
+       ``_scrub_skill_path`` only scrubs AgentConfig's *live* state (for the
+       *next* reload) — it has no reach into this already-captured snapshot.
 
     A process-wide lock now serializes both the reload (step 1) and the scan
     (step 2), so a burst of concurrent requests can't each independently
@@ -384,7 +452,30 @@ async def ensure_catalogue_safety_scanned(
         for name in subagents_excluded:
             subagent_configs.pop(name, None)
         for name in skills_excluded:
-            available_skills.pop(name, None)
+            skill_path = available_skills.pop(name, None)
+            # AgentConfig.exclude_skill() scrubs this path from the
+            # *orchestrator* config and from whatever `self._subagents`
+            # happens to be at the moment it runs (via _scrub_skill_path) —
+            # but that's AgentConfig's own live state, not necessarily the
+            # `subagent_configs` dict pinned above. Each subagent's
+            # `skill_paths` was already resolved (baked in) eagerly at
+            # config-load time by AgentConfig._load_all_subagents, and
+            # load_subagents() (deep_agent/src/infrastructure/subagents.py)
+            # reads that pre-baked list directly rather than re-resolving it
+            # from `available_skills` per subagent. Without this, an
+            # excluded skill's directory path would still reach the
+            # subagent skill loader through this pinned snapshot even
+            # though `available_skills` above no longer lists it — a
+            # prompt-injection distribution path CodeRabbit flagged as CWE-74
+            # (OFFSEC-379). Scrub it from every pinned subagent config too.
+            if skill_path is not None:
+                excluded_path = str(skill_path)
+                for subagent_cfg in subagent_configs.values():
+                    paths = subagent_cfg.get("skill_paths")
+                    if paths:
+                        subagent_cfg["skill_paths"] = [
+                            p for p in paths if str(p) != excluded_path
+                        ]
 
     if subagents_excluded or skills_excluded:
         logger.info(
