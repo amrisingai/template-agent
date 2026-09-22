@@ -1,5 +1,6 @@
 """Unit tests for deep_agent.aegra.safety."""
 
+import hashlib
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -10,6 +11,7 @@ from deep_agent.aegra.safety import (
     _build_merged_config,
     safety_refusal,
 )
+from deep_agent.src.agent.repetition import max_window_chars
 from deep_agent.src.guardrails import (
     ContentSafetyError,
     InputContentSafetyError,
@@ -322,7 +324,11 @@ class TestSafetyAwareRunnableAinvokeRepetition:
                 {"name": "lookup", "args": {"q": "x"}, "id": "call-1"},
             ],
             response_metadata={"model": "gemini-2-5-pro", "finish_reason": "stop"},
-            usage_metadata={"input_tokens": 10, "output_tokens": 500, "total_tokens": 510},
+            usage_metadata={
+                "input_tokens": 10,
+                "output_tokens": 500,
+                "total_tokens": 510,
+            },
         )
         inner = MagicMock()
         inner.ainvoke = AsyncMock(return_value={"messages": [ai]})
@@ -494,7 +500,9 @@ class TestSafetyAwareRunnableAstreamRepetition:
             yield (
                 "messages",
                 (
-                    AIMessageChunk(content=_REPEATED_UNIT + "Anyway, the summary is X."),
+                    AIMessageChunk(
+                        content=_REPEATED_UNIT + "Anyway, the summary is X."
+                    ),
                     {"run_id": "run-2"},
                 ),
             )
@@ -539,6 +547,139 @@ class TestSafetyAwareRunnableAstreamRepetition:
         result = await _collect(sar.astream({}))
         # All chunks pass through unmodified — no truncation at non-outermost level.
         assert len(result) == len(parts)
+
+
+# ---------------------------------------------------------------------------
+# SafetyAwareRunnable.astream — incremental delivery (OFFSEC-380 review round 2)
+#
+# Regression coverage for the streaming-regression finding: with repetition
+# detection enabled, a normal single invocation must not be buffered in full
+# and released only once the invocation ends. The confirmed (non-repeating)
+# prefix must reach the caller as it streams in; only the detector-sized
+# undecided suffix may remain buffered at any point in time.
+# ---------------------------------------------------------------------------
+
+
+def _unique_chunks(n: int, size: int = 64) -> list[str]:
+    """Return ``n`` distinct, non-repeating strings of ``size`` chars each.
+
+    Built from per-index hash digests so concatenating them never produces a
+    consecutively-repeated substring long enough to be mistaken for a
+    degenerate loop by ``detect_repetition_loop``.
+    """
+    return [
+        (hashlib.sha256(str(i).encode()).hexdigest() * ((size // 64) + 1))[:size]
+        for i in range(n)
+    ]
+
+
+class TestSafetyAwareRunnableAstreamIncrementalDelivery:
+    @pytest.mark.asyncio
+    async def test_non_repeating_stream_yields_before_invocation_completes(self):
+        """A normal (non-repeating) response must start reaching the caller
+        while the model is still streaming, not only once the whole
+        invocation has finished."""
+        window = max_window_chars()  # default settings: 400 * 4 = 1600 chars
+        chunk_size = 64
+        # Comfortably more chunks than needed to exceed the detector's window,
+        # so a flush must happen well before the source is exhausted.
+        num_chunks = (window // chunk_size) + 15
+        parts = _unique_chunks(num_chunks, size=chunk_size)
+
+        produced = 0
+
+        async def gen(*a, **kw):
+            nonlocal produced
+            for part in parts:
+                produced += 1
+                yield ("messages", (AIMessageChunk(content=part), {"run_id": "run-1"}))
+
+        inner = MagicMock()
+        inner.astream = gen
+        sar = SafetyAwareRunnable(inner, outermost=True)
+
+        stream = sar.astream({})
+        first_event = await stream.__anext__()
+
+        # A chunk was already forwarded to the caller before the source
+        # finished producing every chunk — i.e. delivery is incremental,
+        # not withheld until the whole invocation completes.
+        assert produced < num_chunks
+        assert first_event[0] == "messages"
+        assert first_event[1][0].content == parts[0]
+
+        # Draining the rest must reproduce the full, unmodified text in order
+        # — nothing lost, duplicated, or reordered by the windowed buffering.
+        rest = [first_event]
+        async for item in stream:
+            rest.append(item)
+        combined = "".join(str(r[1][0].content) for r in rest)
+        assert combined == "".join(parts)
+
+    @pytest.mark.asyncio
+    async def test_repetition_still_detected_after_incremental_prefix_flushed(self):
+        """A loop that starts only *after* a long non-repeating prefix has
+        already been flushed incrementally must still be detected and
+        truncated — the windowed buffering must not weaken detection."""
+        window = max_window_chars()
+        chunk_size = 64
+        prefix_chunks = (window // chunk_size) + 15
+        prefix_parts = _unique_chunks(prefix_chunks, size=chunk_size)
+        looping_parts = [_REPEATED_UNIT] * 6
+
+        async def gen(*a, **kw):
+            for part in prefix_parts:
+                yield ("messages", (AIMessageChunk(content=part), {"run_id": "run-1"}))
+            for part in looping_parts:
+                yield ("messages", (AIMessageChunk(content=part), {"run_id": "run-1"}))
+            # Should never be reached — the proxy stops after detecting the loop.
+            yield (
+                "messages",
+                (AIMessageChunk(content="should not appear"), {"run_id": "run-1"}),
+            )
+
+        inner = MagicMock()
+        inner.astream = gen
+        sar = SafetyAwareRunnable(inner, outermost=True)
+        result = await _collect(sar.astream({}))
+
+        combined = "".join(str(r[1][0].content) for r in result)
+        assert "should not appear" not in combined
+        assert combined.count(_REPEATED_UNIT.strip()) == 1
+        # The incrementally-flushed prefix must still be present in full.
+        assert combined.startswith("".join(prefix_parts))
+
+    @pytest.mark.asyncio
+    async def test_buffer_never_exceeds_detector_window_plus_one_chunk(self):
+        """At no point should more than ``max_window_chars()`` (plus the
+        latest chunk) of confirmed non-repeating text be withheld — proving
+        the fix bounds memory/latency instead of buffering the whole
+        invocation."""
+        window = max_window_chars()
+        chunk_size = 64
+        num_chunks = (window // chunk_size) + 15
+        parts = _unique_chunks(num_chunks, size=chunk_size)
+        max_gap = 0
+        produced = 0
+        consumed = 0
+
+        async def gen(*a, **kw):
+            nonlocal produced
+            for part in parts:
+                produced += 1
+                yield ("messages", (AIMessageChunk(content=part), {"run_id": "run-1"}))
+
+        inner = MagicMock()
+        inner.astream = gen
+        sar = SafetyAwareRunnable(inner, outermost=True)
+
+        async for _ in sar.astream({}):
+            consumed += 1
+            # How far ahead the source has produced relative to what's been
+            # forwarded is bounded by the detector's window, not unbounded.
+            max_gap = max(max_gap, produced - consumed)
+
+        assert max_gap * chunk_size <= window + chunk_size
 
 
 # ---------------------------------------------------------------------------
@@ -757,9 +898,10 @@ class TestSafetyAwareRunnableAstreamEventsRepetition:
             e for e in result if e.get("name") == "repetition_loop_truncated"
         ]
         assert len(truncated_events) == 1
-        assert truncated_events[0]["data"]["chunk"].content.count(
-            _REPEATED_UNIT.strip()
-        ) == 1
+        assert (
+            truncated_events[0]["data"]["chunk"].content.count(_REPEATED_UNIT.strip())
+            == 1
+        )
 
     @pytest.mark.asyncio
     async def test_non_looping_ai_chunks_flushed_unchanged(self):

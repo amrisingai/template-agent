@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from deep_agent.src.agent.repetition import detect_repetition_loop
+from deep_agent.src.agent.repetition import detect_repetition_loop, max_window_chars
 from deep_agent.src.guardrails import (
     TOOL_SAFETY_REFUSAL as _TOOL_SAFETY_REFUSAL,
 )
@@ -218,21 +218,45 @@ class SafetyAwareRunnable:
         this proxy only understands the ("messages", (message, meta)) shape
         it already uses for the safety-refusal chunk below.
 
-        Messages-mode chunks are buffered (not forwarded immediately) and
-        keyed by the chunk metadata's ``run_id`` so that: (1) repetition
-        detection is scoped to a single model invocation rather than the
-        whole graph run, and (2) none of a detected loop's repeats reach the
-        client before the truncation decision is made — the buffer is only
-        flushed once a chunk from a *different* invocation arrives, or the
-        stream ends normally.
+        Messages-mode chunks are only buffered as long as they remain
+        "undecided" — i.e. as long as they fall within the trailing window
+        (:func:`max_window_chars`) that ``detect_repetition_loop`` actually
+        inspects. Once a chunk has fallen further behind the tail than that
+        window, it can no longer influence a future detection decision, so it
+        is forwarded to the caller immediately instead of being held. This
+        keeps single-invocation streaming incremental (the UI's
+        ``messages/partial`` path still receives tokens as they arrive)
+        while preserving the original guarantee for the *undecided* suffix:
+        (1) detection is scoped to a single model invocation, keyed by the
+        chunk metadata's ``run_id``, and (2) none of a detected loop's
+        repeats ever reach the client — only the confirmed non-repeating
+        prefix does, followed by a single truncated chunk once a loop is
+        found (or the invocation ends normally).
         """
         pending: list[Any] = []
+        pending_texts: list[str] = []
         pending_run_id: Any = None
         repetition_text = ""
 
-        def _flush() -> list[Any]:
-            nonlocal pending
-            flushed, pending = pending, []
+        def _flush_all() -> list[Any]:
+            nonlocal pending, pending_texts, repetition_text
+            flushed, pending, pending_texts, repetition_text = pending, [], [], ""
+            return flushed
+
+        def _flush_confirmed_prefix() -> list[Any]:
+            """Forward chunks now too far from the tail to affect detection.
+
+            Called only once a check on the *current* buffer has already
+            returned ``is_loop=False``, so everything trimmed here is
+            confirmed non-repeating.
+            """
+            nonlocal pending, pending_texts, repetition_text
+            window = max_window_chars()
+            flushed: list[Any] = []
+            while pending and len(repetition_text) - len(pending_texts[0]) >= window:
+                flushed.append(pending.pop(0))
+                oldest_text = pending_texts.pop(0)
+                repetition_text = repetition_text[len(oldest_text) :]
             return flushed
 
         try:
@@ -245,10 +269,9 @@ class SafetyAwareRunnable:
                 if message is None:
                     # Non-messages-mode chunk (e.g. "updates"/"debug"): flush
                     # whatever's buffered first to preserve relative ordering.
-                    for buffered in _flush():
+                    for buffered in _flush_all():
                         yield buffered
                     pending_run_id = None
-                    repetition_text = ""
                     yield chunk
                     continue
 
@@ -257,13 +280,14 @@ class SafetyAwareRunnable:
                 if run_id != pending_run_id:
                     # New model invocation — flush the prior one unchanged and
                     # start scoping detection to this invocation only.
-                    for buffered in _flush():
+                    for buffered in _flush_all():
                         yield buffered
                     pending_run_id = run_id
-                    repetition_text = ""
 
+                text = _message_text(getattr(message, "content", ""))
                 pending.append(chunk)
-                repetition_text += _message_text(getattr(message, "content", ""))
+                pending_texts.append(text)
+                repetition_text += text
                 is_loop, truncated = detect_repetition_loop(repetition_text)
                 if is_loop:
                     logger.warning(
@@ -271,13 +295,20 @@ class SafetyAwareRunnable:
                         "truncating (buffered_chars=%d)",
                         len(repetition_text),
                     )
-                    _flush()  # discard the buffered repeats — never sent.
+                    _flush_all()  # discard the buffered repeats — never sent.
                     from langchain_core.messages import AIMessage
 
                     yield ("messages", (AIMessage(content=truncated), {}))
                     return
 
-            for buffered in _flush():
+                # No loop (yet): anything now older than the detector's
+                # window can never change that verdict, so it's safe to
+                # forward it incrementally rather than holding it hostage
+                # until the invocation ends.
+                for buffered in _flush_confirmed_prefix():
+                    yield buffered
+
+            for buffered in _flush_all():
                 yield buffered
         except Exception as exc:
             if not self._outermost:

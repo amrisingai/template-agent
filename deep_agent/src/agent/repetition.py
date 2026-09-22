@@ -28,6 +28,34 @@ from deep_agent.src.settings import settings
 _MAX_UNIT_LEN = 400
 
 
+def max_window_chars(
+    min_repeats: int | None = None, max_unit_len: int = _MAX_UNIT_LEN
+) -> int:
+    """Largest number of trailing characters ``detect_repetition_loop`` ever inspects.
+
+    For any ``unit_len`` up to ``max_unit_len``, the detector only looks at the
+    last ``unit_len * min_repeats`` characters of the text it's given — it
+    never reasons about anything further back. This helper returns that
+    absolute upper bound (``max_unit_len * min_repeats``), letting streaming
+    callers know how many trailing characters they must keep buffered (as an
+    "undecided suffix") in order to preserve *exactly* the same detection
+    behavior while still being able to forward everything older than that
+    boundary immediately, incrementally, as it streams in.
+
+    Args:
+        min_repeats: Minimum consecutive repeats required to flag a loop.
+            Defaults to ``settings.REPETITION_LOOP_MIN_REPEATS``.
+        max_unit_len: Largest unit length considered by the detector.
+
+    Returns:
+        The number of trailing characters that may still influence a future
+        ``detect_repetition_loop`` call.
+    """
+    if min_repeats is None:
+        min_repeats = settings.REPETITION_LOOP_MIN_REPEATS
+    return max_unit_len * max(min_repeats, 1)
+
+
 def detect_repetition_loop(
     text: str,
     min_unit_len: int | None = None,

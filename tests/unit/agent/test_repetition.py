@@ -1,6 +1,8 @@
 """Unit tests for deep_agent.src.agent.repetition (OFFSEC-380)."""
 
-from deep_agent.src.agent.repetition import detect_repetition_loop
+from unittest.mock import patch
+
+from deep_agent.src.agent.repetition import detect_repetition_loop, max_window_chars
 
 
 class TestDetectRepetitionLoop:
@@ -96,3 +98,52 @@ class TestDetectRepetitionLoop:
         assert is_loop is True
         assert out.endswith(unit)
         assert out.count(unit.strip()) == 1
+
+
+class TestMaxWindowChars:
+    def test_default_uses_settings_min_repeats(self):
+        with patch(
+            "deep_agent.src.agent.repetition.settings.REPETITION_LOOP_MIN_REPEATS", 4
+        ):
+            assert max_window_chars() == 400 * 4
+
+    def test_explicit_min_repeats_overrides_settings(self):
+        assert max_window_chars(min_repeats=2) == 400 * 2
+
+    def test_explicit_max_unit_len_is_respected(self):
+        assert max_window_chars(min_repeats=3, max_unit_len=100) == 300
+
+    def test_min_repeats_below_one_is_clamped_to_one(self):
+        # Guards against a pathological zero/negative window that would
+        # make every character "undecided" forever.
+        assert max_window_chars(min_repeats=0, max_unit_len=100) == 100
+        assert max_window_chars(min_repeats=-5, max_unit_len=100) == 100
+
+    def test_bounds_the_actual_scan_window_of_detect_repetition_loop(self):
+        """A streaming caller that only keeps the last ``max_window_chars()``
+        characters buffered must see the identical verdict as one that kept
+        the entire text — proving the returned bound is not too small."""
+        min_repeats, max_unit_len = 4, 400
+        window = max_window_chars(min_repeats=min_repeats, max_unit_len=max_unit_len)
+        unit = "z" * 50
+        full_text = "unrelated preamble text that is now long gone. " * 20 + unit * 4
+
+        is_loop_full, out_full = detect_repetition_loop(
+            full_text,
+            min_unit_len=20,
+            min_repeats=min_repeats,
+            max_unit_len=max_unit_len,
+        )
+        windowed_text = full_text[-window:]
+        is_loop_windowed, out_windowed = detect_repetition_loop(
+            windowed_text,
+            min_unit_len=20,
+            min_repeats=min_repeats,
+            max_unit_len=max_unit_len,
+        )
+
+        assert is_loop_full is True
+        assert is_loop_windowed == is_loop_full
+        # The kept (non-repeated) tail is identical whether or not the
+        # caller discarded everything older than the window.
+        assert out_windowed == out_full[-len(out_windowed) :]
