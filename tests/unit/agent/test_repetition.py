@@ -1,4 +1,4 @@
-"""Unit tests for deep_agent.src.agent.repetition (OFFSEC-380)."""
+"""Unit tests for deep_agent.src.agent.repetition."""
 
 from unittest.mock import patch
 

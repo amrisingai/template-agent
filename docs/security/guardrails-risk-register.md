@@ -206,7 +206,7 @@ write-once audit store or forward to a SIEM. Add an alert for gaps in
 
 ---
 
-### 8. Degenerate repetition loop / token exhaustion — Addressed (OFFSEC-380)
+### 8. Degenerate repetition loop / token exhaustion — Addressed
 **Threat:** Gemini can occasionally enter a degenerate autoregressive loop —
 most often when refusing a prompt (e.g. refusing to validate an unverifiable
 user claim) — and emit the exact same sentence/disclaimer 50-100+ times in a

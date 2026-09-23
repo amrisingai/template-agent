@@ -81,11 +81,10 @@ class Settings(BaseSettings):
     SAFETY_HARASSMENT: SafetyThreshold = Field(default="BLOCK_LOW_AND_ABOVE")
     SAFETY_SEXUALLY_EXPLICIT: SafetyThreshold = Field(default="BLOCK_LOW_AND_ABOVE")
 
-    # ── Repetition Loop Detection (OFFSEC-380) ───────────────────────
+    # ── Repetition Loop Detection ───────────────────────────────────
     # Gemini occasionally enters a degenerate autoregressive loop, repeating
-    # the same sentence/phrase dozens of times in a single completion. These
-    # settings tune the detector in deep_agent.src.agent.repetition that
-    # SafetyAwareRunnable uses to break/truncate such responses.
+    # the same sentence/phrase dozens of times. These settings tune the
+    # detector used by SafetyAwareRunnable to break/truncate such responses.
     REPETITION_LOOP_DETECTION_ENABLED: bool = Field(default=True)
     REPETITION_LOOP_MIN_UNIT_LEN: int = Field(
         default=20,

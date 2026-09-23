@@ -28,10 +28,10 @@ _INPUT_SAFETY_REFUSAL = "I can't help with that request due to content safety po
 
 
 def _message_text(content: Any) -> str:
-    """Extract plain text from an AIMessage/AIMessageChunk.content.
+    """Extract plain text from an AIMessage content field.
 
-    ``content`` is usually a str, but Gemini can return a list of parts
-    (e.g. ``[{"type": "text", "text": "..."}]``) — join those into one string.
+    Handles both str and Gemini's list-of-parts format
+    (e.g. ``[{"type": "text", "text": "..."}]``).
     """
     if isinstance(content, list):
         return "".join(
@@ -41,12 +41,7 @@ def _message_text(content: Any) -> str:
 
 
 def _messages_mode_content(chunk: Any) -> Any | None:
-    """Return the message object if ``chunk`` is a ("messages", (message, meta)) tuple.
-
-    This is the chunk shape LangGraph yields in ``stream_mode="messages"`` —
-    the only shape this proxy already understands (used for the safety-refusal
-    chunk below). Any other stream mode is passed through unmodified.
-    """
+    """Return the message object from a ``("messages", (message, meta))`` chunk, or None."""
     if (
         isinstance(chunk, tuple)
         and len(chunk) == 2
@@ -61,12 +56,10 @@ def _messages_mode_content(chunk: Any) -> Any | None:
 def safety_refusal(exc: BaseException) -> str | None:
     """Walk the exception chain and return the appropriate refusal message.
 
-    ModelRetryMiddleware raises a fresh exception with the original class name
-    embedded in the message string but NOT in __cause__/__context__ (it collects
-    exceptions across retries and raises after the loop, so the raise is outside
-    any except block).  We therefore check both the exception type and the message
-    text at each step.
-    Returns None if no safety-related error is found anywhere in the chain.
+    Checks both exception type and string representation at each step since
+    ModelRetryMiddleware wraps originals in a fresh exception with the class
+    name only in the message string (not in __cause__/__context__).
+    Returns None if no safety-related error is found.
     """
     seen: set[int] = set()
     current: BaseException | None = exc
@@ -77,8 +70,8 @@ def safety_refusal(exc: BaseException) -> str | None:
             return _INPUT_SAFETY_REFUSAL
         if isinstance(current, ContentSafetyError):
             return _INPUT_SAFETY_REFUSAL
-        # ModelRetryMiddleware raises a wrapper whose message contains the
-        # original class name — check the string representation as a fallback.
+        # ModelRetryMiddleware embeds the original class name in the wrapper
+        # message — check string representation as a fallback.
         msg = str(current)
         if "ToolContentSafetyError" in msg:
             return _TOOL_SAFETY_REFUSAL
@@ -102,20 +95,17 @@ def _build_merged_config(config: Any) -> tuple[dict, dict]:
 
 
 class SafetyAwareRunnable:
-    """Proxy over any async runnable that converts ContentSafetyError to a refusal message.
+    """Proxy that converts ContentSafetyError to a refusal message.
 
-    Used to wrap both the orchestrator's compiled graph (_SafetyAwareGraph alias)
-    and CompiledSubAgent runnables so that safety errors raised anywhere inside
-    the runnable — including in skills — produce a consistent user-facing message
-    instead of crashing or being stringified by deepagents.
+    Wraps both the orchestrator graph and CompiledSubAgent runnables so
+    safety errors raised anywhere — including in skills — produce a
+    consistent user-facing message instead of crashing.
 
-    Tool-result safety is handled upstream by GuardianToolProxy, which replaces
-    unsafe results with a safe placeholder before they enter LangGraph state.
-    This runnable only needs to handle input safety errors (from on_chat_model_start
-    via ModelRetryMiddleware).
+    Tool-result safety is handled upstream by GuardianToolProxy.
+    This runnable handles input safety errors (via ModelRetryMiddleware).
 
-    outermost=True  (orchestrator graph): catches all safety exceptions.
-    outermost=False (inner subagent runnables): re-raises so the outermost catches it.
+    outermost=True  (orchestrator): catches all safety exceptions.
+    outermost=False (inner subagent): re-raises so the outermost catches it.
     """
 
     def __init__(self, runnable: Any, *, outermost: bool = False) -> None:
@@ -151,11 +141,8 @@ class SafetyAwareRunnable:
         try:
             merged_config, safety_ctx = _build_merged_config(config)
             result = await self._runnable.ainvoke(input, merged_config, **kwargs)
-            # Override LLM output with consistent refusal if any tool was safety-blocked.
-            # Run at every level (not just outermost) so that inner SafetyAwareRunnables
-            # (e.g. analyst subagent, outermost=False) also override their final AIMessage.
-            # This puts _TOOL_SAFETY_REFUSAL into the task tool's return value, which the
-            # orchestrator's on_tool_end sentinel check can then detect.
+            # Override with consistent refusal if any tool was safety-blocked.
+            # Runs at every level so inner SafetyAwareRunnables also override.
             from langchain_core.messages import AIMessage, ToolMessage
 
             msgs = list(result.get("messages", []) if isinstance(result, dict) else [])
@@ -173,11 +160,9 @@ class SafetyAwareRunnable:
                     "messages": msgs,
                 }
             elif settings.REPETITION_LOOP_DETECTION_ENABLED:
-                # OFFSEC-380: the model can occasionally emit a degenerate
-                # repetition loop (e.g. the same refusal sentence dozens of
-                # times). Truncate the final AIMessage before it re-enters
-                # conversation state/context. Runs at every level (not just
-                # outermost) — same rationale as the tool-block override above.
+                # Truncate degenerate repetition loops (same refusal sentence
+                # dozens of times) before re-entering conversation state.
+                # Runs at every level — same rationale as the tool-block above.
                 for i in range(len(msgs) - 1, -1, -1):
                     if isinstance(msgs[i], AIMessage):
                         text = _message_text(msgs[i].content)
@@ -210,28 +195,18 @@ class SafetyAwareRunnable:
             return {"messages": [AIMessage(content=refusal)]}
 
     async def astream(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
-        """Stream chunks, yielding a refusal message if a safety error is raised.
+        """Stream chunks, converting safety errors to a refusal message.
 
-        Also detects a degenerate repetition loop (OFFSEC-380) in
-        ``stream_mode="messages"`` chunks and truncates it before it grows
-        unbounded. Other stream-mode shapes are passed through unmodified —
-        this proxy only understands the ("messages", (message, meta)) shape
-        it already uses for the safety-refusal chunk below.
+        Also detects degenerate repetition loops in
+        ``stream_mode="messages"`` chunks and truncates before they grow
+        unbounded. Other stream-mode shapes pass through unmodified.
 
-        Messages-mode chunks are only buffered as long as they remain
-        "undecided" — i.e. as long as they fall within the trailing window
-        (:func:`max_window_chars`) that ``detect_repetition_loop`` actually
-        inspects. Once a chunk has fallen further behind the tail than that
-        window, it can no longer influence a future detection decision, so it
-        is forwarded to the caller immediately instead of being held. This
-        keeps single-invocation streaming incremental (the UI's
-        ``messages/partial`` path still receives tokens as they arrive)
-        while preserving the original guarantee for the *undecided* suffix:
-        (1) detection is scoped to a single model invocation, keyed by the
-        chunk metadata's ``run_id``, and (2) none of a detected loop's
-        repeats ever reach the client — only the confirmed non-repeating
-        prefix does, followed by a single truncated chunk once a loop is
-        found (or the invocation ends normally).
+        Messages-mode chunks are buffered only while they remain within the
+        trailing detection window (:func:`max_window_chars`). Once a chunk
+        falls outside that window it is forwarded immediately, keeping
+        streaming incremental. Detection is scoped per model invocation
+        (keyed by ``run_id``). If a loop is found, buffered repeats are
+        discarded and a single truncated AIMessage is yielded instead.
         """
         pending: list[Any] = []
         pending_texts: list[str] = []
@@ -244,12 +219,7 @@ class SafetyAwareRunnable:
             return flushed
 
         def _flush_confirmed_prefix() -> list[Any]:
-            """Forward chunks now too far from the tail to affect detection.
-
-            Called only once a check on the *current* buffer has already
-            returned ``is_loop=False``, so everything trimmed here is
-            confirmed non-repeating.
-            """
+            """Forward chunks outside the detection window (confirmed non-repeating)."""
             nonlocal pending, pending_texts, repetition_text
             window = max_window_chars()
             flushed: list[Any] = []
@@ -267,8 +237,7 @@ class SafetyAwareRunnable:
 
                 message = _messages_mode_content(chunk)
                 if message is None:
-                    # Non-messages-mode chunk (e.g. "updates"/"debug"): flush
-                    # whatever's buffered first to preserve relative ordering.
+                    # Non-messages-mode chunk: flush buffered first, then yield.
                     for buffered in _flush_all():
                         yield buffered
                     pending_run_id = None
@@ -278,8 +247,7 @@ class SafetyAwareRunnable:
                 _, meta = chunk[1]
                 run_id = meta.get("run_id") if isinstance(meta, dict) else None
                 if run_id != pending_run_id:
-                    # New model invocation — flush the prior one unchanged and
-                    # start scoping detection to this invocation only.
+                    # New model invocation — flush the prior one and reset.
                     for buffered in _flush_all():
                         yield buffered
                     pending_run_id = run_id
@@ -295,16 +263,13 @@ class SafetyAwareRunnable:
                         "truncating (buffered_chars=%d)",
                         len(repetition_text),
                     )
-                    _flush_all()  # discard the buffered repeats — never sent.
+                    _flush_all()  # Discard buffered repeats.
                     from langchain_core.messages import AIMessage
 
                     yield ("messages", (AIMessage(content=truncated), {}))
                     return
 
-                # No loop (yet): anything now older than the detector's
-                # window can never change that verdict, so it's safe to
-                # forward it incrementally rather than holding it hostage
-                # until the invocation ends.
+                # No loop yet: forward anything outside the detection window.
                 for buffered in _flush_confirmed_prefix():
                     yield buffered
 
@@ -323,24 +288,21 @@ class SafetyAwareRunnable:
     async def astream_events(
         self, input: Any, config: Any = None, **kwargs: Any
     ) -> Any:
-        """Stream events, suppressing buffered AI output when a safety block is detected."""
+        """Stream events, suppressing AI output when a safety block or repetition loop is detected."""
         logger.debug(
             "safety_aware_runnable astream_events called outermost=%s", self._outermost
         )
         try:
             merged_config, safety_ctx = _build_merged_config(config)
-            # Buffer AI output chunks so we can replace them with the refusal if blocked.
-            # Non-AI events (tool calls, tool results, metadata) stream through immediately.
+            # Buffer AI chunks; non-AI events stream through immediately.
             ai_chunks: list[Any] = []
             tool_blocked_via_sentinel = False
             active_tool_calls = 0  # tracks in-flight tools at this graph level
-            # OFFSEC-380: incrementally accumulated text of the AI response
-            # currently being streamed, used to detect a degenerate
-            # repetition loop early and break out before it consumes
-            # unbounded tokens. Scoped per model invocation (keyed by each
-            # on_chat_model_stream event's own run_id) so an unrelated later
-            # (or earlier) LLM call's text in the same graph run can't dilute
-            # detection or combine into a false positive.
+            # Accumulated text of the current AI response, used to detect
+            # repetition loops early and break before consuming unbounded
+            # tokens. Scoped per model invocation (keyed by run_id) so
+            # unrelated LLM calls can't dilute detection or combine into
+            # a false positive.
             repetition_text = ""
             repetition_run_id: Any = None
             repetition_loop_hit = False
@@ -359,10 +321,7 @@ class SafetyAwareRunnable:
                     if _TOOL_SAFETY_REFUSAL in str(output):
                         tool_blocked_via_sentinel = True
                     yield event
-                    # Break only when every tool in this batch has finished AND one was
-                    # blocked. Other parallel tools run to completion first; the break
-                    # fires between the last on_tool_end and the orchestrator's next LLM
-                    # call, so no retry is ever dispatched.
+                    # Break after last tool in batch finishes when blocked.
                     if tool_blocked_via_sentinel and active_tool_calls == 0:
                         break
                     continue
@@ -393,8 +352,7 @@ class SafetyAwareRunnable:
                 else:
                     yield event
 
-            # Emit either the consistent refusal, the truncated repetition-loop
-            # content, or the buffered LLM chunks — in that priority order.
+            # Emit refusal, truncated loop content, or buffered chunks (priority order).
             if self._outermost and (safety_ctx["blocked"] or tool_blocked_via_sentinel):
                 from langchain_core.messages import AIMessage
 

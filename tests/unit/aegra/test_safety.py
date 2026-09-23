@@ -248,7 +248,7 @@ class TestSafetyAwareRunnableAinvoke:
 
 
 # ---------------------------------------------------------------------------
-# SafetyAwareRunnable.ainvoke — repetition loop detection (OFFSEC-380)
+# SafetyAwareRunnable.ainvoke — repetition loop detection
 # ---------------------------------------------------------------------------
 
 
@@ -412,7 +412,7 @@ class TestSafetyAwareRunnableAstream:
 
 
 # ---------------------------------------------------------------------------
-# SafetyAwareRunnable.astream — repetition loop detection (OFFSEC-380)
+# SafetyAwareRunnable.astream — repetition loop detection
 # ---------------------------------------------------------------------------
 
 
@@ -550,13 +550,12 @@ class TestSafetyAwareRunnableAstreamRepetition:
 
 
 # ---------------------------------------------------------------------------
-# SafetyAwareRunnable.astream — incremental delivery (OFFSEC-380 review round 2)
+# SafetyAwareRunnable.astream — incremental delivery
 #
-# Regression coverage for the streaming-regression finding: with repetition
-# detection enabled, a normal single invocation must not be buffered in full
-# and released only once the invocation ends. The confirmed (non-repeating)
-# prefix must reach the caller as it streams in; only the detector-sized
-# undecided suffix may remain buffered at any point in time.
+# Regression coverage: with repetition detection enabled, a normal single
+# invocation must not be buffered in full and released only once it ends.
+# The confirmed (non-repeating) prefix must reach the caller as it streams
+# in; only the detector-sized undecided suffix may remain buffered.
 # ---------------------------------------------------------------------------
 
 
@@ -801,7 +800,7 @@ class TestSafetyAwareRunnableAstreamEvents:
 
 
 # ---------------------------------------------------------------------------
-# SafetyAwareRunnable.astream_events — repetition loop detection (OFFSEC-380)
+# SafetyAwareRunnable.astream_events — repetition loop detection
 # ---------------------------------------------------------------------------
 
 
