@@ -152,10 +152,8 @@ class TestResolveCapabilityManifestImplicit:
         assert manifest.source == IMPLICIT_ALL_MCP
 
     def test_explicit_empty_tools_list_does_not_grant_all(self):
-        """Regression guard (OFFSEC-384 review): an author writing `tools: []`
-        on purpose is the most restrictive possible declaration and must not
-        be treated the same as omitting `tools:` altogether -- it must NOT
-        fall back to granting every tool on the declared MCP server(s)."""
+        """Explicit `tools: []` must not fall back to granting every
+        tool on declared MCP server(s)."""
         available = [_tool("search"), _tool("write_file")]
 
         with patch("deep_agent.src.audit.emitter.emit_audit_event") as emit:

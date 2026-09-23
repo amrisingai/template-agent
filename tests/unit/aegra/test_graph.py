@@ -225,9 +225,8 @@ class TestAgentFactory:
             "model": "gemini-2.5-flash",
             "body": "test prompt",
             "skill_paths": [],
-            # 'tools:' key genuinely absent (not an explicit empty list) --
-            # that omission is what should trigger the implicit-all-mcp grant
-            # below (OFFSEC-384 review: the two must not be conflated).
+            # 'tools:' key absent (not an explicit empty list) triggers
+            # the implicit-all-mcp grant.
             "mcps": ["dataverse-mcp-prod1"],
         }
         mock_config.resolve_tools.return_value = []
@@ -302,9 +301,8 @@ class TestAgentFactory:
 
         assert result is mock_compiled
         built_tools = mock_create.call_args.kwargs["tools"]
-        # Tools are wrapped by CapabilityToolProxy (OFFSEC-384); compare by
-        # name rather than identity, and confirm the enforcement wrapper
-        # itself is actually present (not just a same-named passthrough).
+        # Tools are wrapped by CapabilityToolProxy; compare by name and
+        # confirm the enforcement wrapper is present.
         assert [t.name for t in built_tools] == [mock_tool.name]
         assert all(isinstance(t, CapabilityToolProxy) for t in built_tools)
         mock_get_mcp.assert_awaited_once_with(
@@ -313,14 +311,8 @@ class TestAgentFactory:
 
     @pytest.mark.asyncio
     async def test_explicit_tool_list_excludes_other_mcp_server_tools(self):
-        """Regression guard (OFFSEC-384): an explicit 'tools:' allow-list must not
-        be widened with the rest of a declared MCP server's tools.
-
-        Before this fix, graph.py unconditionally unioned every MCP tool not
-        already in the resolved set back into the agent's tool list, even when
-        the agent declared an explicit 'tools:' allow-list -- silently
-        expanding a reviewed manifest to the server's entire live tool set.
-        """
+        """Explicit 'tools:' allow-list must not be widened with other
+        MCP server tools."""
         mock_compiled = MagicMock()
         mock_config = MagicMock()
         mock_config.get_orchestrator_config.return_value = {

@@ -1,33 +1,18 @@
 """Capability manifest resolution.
 
-The manifest is the enforced answer to "which tools may this agent invoke at
-runtime" -- as distinct from "which MCP servers did the agent declare", which
-is all the platform previously enforced (see OFFSEC-384). It is derived once
-per request from the frontmatter agent-engine materializes into this pod at
-deploy time from the reviewed ``AGENTS.md``. A running conversation cannot
-alter it, so it stays intact even if a tool result carries a prompt injection.
+Resolves the enforced tool allow-list for an agent or subagent from
+deploy-time frontmatter. A running conversation cannot alter it.
 
-``resolve_capability_manifest`` replaces two separate inline fallbacks that
-existed before this package, one in ``graph.py`` and (nearly identically)
-twice in ``subagents.py``:
+Key behaviours:
 
-- An agent that declared ``mcps:`` without an explicit ``tools:`` list
-  silently got every tool those servers happened to expose. Behaviour for
-  these agents is unchanged here -- they still get every tool the server
-  exposes -- but the grant is now a named, logged, and enforced
-  ``CapabilityManifest`` instead of an implicit side effect of list-building.
-- On ``graph.py`` specifically, an agent *with* an explicit ``tools:`` list
-  still had every other tool from its declared MCP server(s) unioned back
-  in (any MCP tool not already in the resolved set was appended
-  unconditionally). That silently widened a reviewed allow-list to the
-  server's entire live tool set and is the exact gap OFFSEC-384 calls out --
-  this resolver does not reproduce it: an explicit ``tools:`` list is now
-  authoritative and is never unioned with the rest of the server's tools.
+- Explicit ``tools:`` list → authoritative manifest; never widened with
+  additional MCP server tools.
+- ``mcps:`` declared without ``tools:`` → implicit grant of every tool
+  those servers expose, logged and audited as ``implicit_all_mcp``.
+- ``tools: []`` (explicit empty) → empty manifest; most restrictive.
 
-An explicit ``tools:`` list remains the recommended way to pin an agent's
-capabilities to what was actually reviewed at publish time, since an MCP
-server's live tool set can otherwise drift after review without the agent
-ever being re-reviewed.
+An explicit ``tools:`` list is the recommended way to pin capabilities
+to what was reviewed at publish time.
 """
 
 from __future__ import annotations
@@ -82,30 +67,20 @@ def resolve_capability_manifest(
     mcp_server_names: list[str] | None,
     agent_name: str = "agent",
 ) -> tuple[list[Any], CapabilityManifest]:
-    """Resolve the enforced tool list and the manifest that will police it.
+    """Resolve the enforced tool list and capability manifest.
 
     Args:
-        tool_names: Explicit ``tools:`` frontmatter list, if any. Callers
-            must pass ``None`` when the ``tools:`` key is absent from
-            frontmatter entirely (e.g. ``agent_cfg.get("tools")``, not
-            ``agent_cfg.get("tools", [])``) so an *omitted* field can be
-            told apart from an author writing ``tools: []`` on purpose --
-            the two must not collapse to the same fallback behaviour below.
-        available_tools: All tools currently reachable from the agent's
-            declared MCP servers.
-        mcp_server_names: Declared ``mcps:`` frontmatter list, if any.
-        agent_name: Orchestrator or subagent name, for logging/audit.
+        tool_names: Explicit ``tools:`` list, or ``None`` when omitted.
+            Pass ``None`` (not ``[]``) for absent keys so the omitted-vs-
+            explicit-empty distinction is preserved.
+        available_tools: Tools reachable from the agent's declared MCP servers.
+        mcp_server_names: Declared ``mcps:`` list, if any.
+        agent_name: Agent/subagent name for logging.
 
     Returns:
-        ``(tools, manifest)`` -- ``tools`` is the resolved tool list (the same
-        result the old inline fallbacks produced); ``manifest`` is the frozen
-        allow-list a ``CapabilityToolProxy`` enforces before every dispatch.
+        ``(tools, manifest)`` tuple.
     """
-    # Imported lazily (not at module load time) so tests -- and any future
-    # caller -- that patch `deep_agent.src.agent.config.agent_config` before
-    # invoking this function see the patched singleton, matching the
-    # existing lazy-import pattern used by graph.py/subagents.py for the
-    # same reason.
+    # Lazy import so tests can patch agent_config before this runs.
     from deep_agent.src.agent.config import agent_config
 
     tools = (
@@ -121,12 +96,8 @@ def resolve_capability_manifest(
             source=EXPLICIT,
         )
 
-    # `tool_names == []` (author wrote an explicit empty allow-list) must NOT
-    # fall through to the implicit-all-mcp grant below -- that would make the
-    # most restrictive possible declaration behave identically to omitting
-    # `tools:` altogether, i.e. the opposite of what the author asked for.
-    # Only a genuinely *omitted* field (`tool_names is None`) gets the
-    # implicit fallback.
+    # Explicit empty list (tools: []) → no tools; only omitted field gets
+    # the implicit-all-mcp fallback.
     if tool_names is None and mcp_server_names and available_tools:
         logger.info(
             "capability_implicit_grant",

@@ -1,16 +1,8 @@
-"""CapabilityToolProxy -- the runtime enforcement point for the capability manifest.
+"""CapabilityToolProxy — runtime enforcement point for the capability manifest.
 
-Wraps a tool so its manifest membership is checked immediately before the
-inner tool executes, on every call, no matter which code path assembled the
-graph's tool list. This is deliberately independent of the LLM: the check
-reads a ``CapabilityManifest`` computed once at graph-build time, so nothing
-in the running conversation -- including a prompt injection surfaced through
-a tool result -- can add a tool to the allow-list or bypass the check.
-
-This mirrors the existing ``GuardianToolProxy`` pattern (same ``BaseTool``
-wrapper shape) so LangGraph's ``ToolNode`` and deepagents see an ordinary
-tool, and other wrappers (Guardian content-safety, MCP auth injection) can be
-composed with it in any order.
+Wraps each tool so manifest membership is checked before every dispatch,
+independent of the LLM's context. Mirrors the ``GuardianToolProxy`` pattern
+so LangGraph/deepagents see an ordinary ``BaseTool`` and wrappers compose.
 """
 
 from __future__ import annotations
@@ -112,19 +104,11 @@ class CapabilityToolProxy(BaseTool):
         return await self._inner.ainvoke(input, config, **kwargs)
 
     def _run(self, *args: Any, **kwargs: Any) -> Any:
-        """Sync fallback path; same enforcement as ainvoke.
+        """Sync fallback; same manifest check as ainvoke.
 
-        ``BaseTool.run()`` parses the caller's input against the tool's
-        schema and, for a generic ``_run(*args, **kwargs)`` signature like
-        this one, always delivers it as either a single positional value
-        (unstructured tools) or as keyword arguments matching the schema
-        fields (structured tools) -- never both. ``BaseTool.invoke()``
-        expects that same input back as a single ``input`` argument, so it
-        must be reassembled here rather than re-spread with ``*args,
-        **kwargs``, which would try to satisfy ``invoke``'s ``input``
-        parameter from field-named kwargs and raise
-        ``TypeError: missing 1 required positional argument: 'input'`` for
-        every structured (multi-field) tool.
+        Reassembles input for ``invoke()`` since ``BaseTool.run()`` delivers
+        structured-tool fields as kwargs, but ``invoke()`` expects a single
+        ``input`` argument.
         """
         if self._denied():
             return CAPABILITY_DENIED_RESULT
@@ -133,15 +117,11 @@ class CapabilityToolProxy(BaseTool):
 
 
 def enforce_capability(tools: list[Any], manifest: CapabilityManifest) -> list[Any]:
-    """Wrap every tool in *tools* with a CapabilityToolProxy bound to *manifest*.
+    """Wrap every tool with a CapabilityToolProxy bound to *manifest*.
 
-    This is the always-on defense-in-depth gate: under normal operation every
-    tool passed in is already a member of *manifest* (both are derived from
-    the same resolution step), so no legitimate call is affected. The value is
-    that any future code path that adds a tool to the graph without going
-    through capability resolution -- a regression, a bug in a merge, or later
-    a dynamically-injected tool -- is denied at dispatch time instead of
-    silently executing.
+    Defense-in-depth: tools already match the manifest under normal
+    operation, but a regression or dynamic injection that bypasses
+    resolution is caught at dispatch time.
     """
     if not tools:
         return tools

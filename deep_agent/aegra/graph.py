@@ -284,9 +284,7 @@ async def agent(runtime: ServerRuntime) -> Any:
     orch_model_raw = orchestrator_cfg.get("model", "gemini-3.1-pro-preview")
     system_prompt = orchestrator_cfg.get("body", "")
     skill_paths = orchestrator_cfg.get("skill_paths", [])
-    # No default here: a `None` (key absent) must stay distinguishable from
-    # an explicit `tools: []` for resolve_capability_manifest's fallback
-    # logic below (OFFSEC-384).
+    # None (key absent) vs [] (explicit empty) matters for manifest resolution.
     tool_names = orchestrator_cfg.get("tools")
     mcp_server_names = orchestrator_cfg.get("mcps", [])
 
@@ -372,12 +370,9 @@ async def agent(runtime: ServerRuntime) -> Any:
         resolve_capability_manifest,
     )
 
-    # Enforced tool manifest (OFFSEC-384): resolved once from deploy-time
-    # frontmatter, never from anything the running conversation can influence.
-    # An explicit 'tools:' list is authoritative and is NOT unioned with the
-    # rest of the declared MCP server's tools; only agents that omit 'tools:'
-    # get every tool the server currently exposes (logged/audited as an
-    # implicit grant).
+    # Capability manifest: resolved once from deploy-time frontmatter.
+    # Explicit 'tools:' is authoritative; agents omitting it get every
+    # tool their declared MCP servers expose (logged as implicit grant).
     tools, capability_manifest = resolve_capability_manifest(
         tool_names, all_available_tools, mcp_server_names, agent_name=agent_name
     )
@@ -396,8 +391,6 @@ async def agent(runtime: ServerRuntime) -> Any:
         )
         tools.extend(resource_tools)
 
-    # Dispatch-time gate: every tool call is checked against the manifest
-    # above, independent of the model's context (OFFSEC-384).
     tools = enforce_capability(tools, capability_manifest)
 
     from deep_agent.src.infrastructure.middleware import (

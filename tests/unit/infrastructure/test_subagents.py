@@ -186,8 +186,7 @@ class TestLoadSubagents:
             mock_resolve_tools.assert_called_once_with(
                 ["calculate_bmi", "search_web"], available_tools, agent_name="analyst"
             )
-            # Tools are wrapped by CapabilityToolProxy (OFFSEC-384); compare by
-            # name rather than identity.
+            # Tools are wrapped by CapabilityToolProxy; compare by name.
             built_tools = mock_sa.call_args.kwargs["tools"]
             assert [t.name for t in built_tools] == ["calculate_bmi", "search_web"]
             assert all(isinstance(t, CapabilityToolProxy) for t in built_tools)
@@ -980,8 +979,7 @@ class TestGuardianActivationGate:
         ):
             load_subagents(tools=[mock_tool])
 
-        # The tool passed to wrap_tools is wrapped by CapabilityToolProxy
-        # (OFFSEC-384); assert on shape/name rather than identity.
+        # Tools are wrapped by CapabilityToolProxy; assert on name.
         wrap_call_args = mock_wrap.call_args.args[0]
         assert [t.name for t in wrap_call_args] == [mock_tool.name]
         assert all(isinstance(t, CapabilityToolProxy) for t in wrap_call_args)

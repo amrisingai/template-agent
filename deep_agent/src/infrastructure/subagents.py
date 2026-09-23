@@ -384,6 +384,29 @@ def _build_single_subagent(
     return _build_default_subagent(name, agent_cfg, tools)
 
 
+def _filter_tools_by_mcp_names(
+    tools: list[Any],
+    mcp_names: list[str],
+) -> list[Any]:
+    """Scope the orchestrator-wide tool pool to this subagent's declared servers.
+
+    ``tools`` comes from the orchestrator and may include tools from every
+    MCP server it connected to. When a subagent only declares a subset of
+    those servers, the pool must be narrowed before manifest resolution so
+    the implicit-all-mcp grant does not authorize undeclared servers' tools.
+    Tools without ``mcp_server`` metadata (non-MCP tools) pass through.
+    """
+    if not mcp_names:
+        return tools
+    allowed = set(mcp_names)
+    return [
+        t
+        for t in tools
+        if getattr(t, "metadata", {}).get("mcp_server") in allowed
+        or not getattr(t, "metadata", {}).get("mcp_server")
+    ]
+
+
 def _resolve_and_enforce_subagent_tools(
     name: str,
     agent_cfg: dict[str, Any],
@@ -391,12 +414,8 @@ def _resolve_and_enforce_subagent_tools(
 ) -> list[Any]:
     """Resolve, manifest-authorize, and enforce this subagent's tool set.
 
-    Builds the enforced capability manifest (OFFSEC-384) from the subagent's
-    declared ``tools:``/``mcps:``, adds its MCP resource-read tools (which
-    carry their own per-call URI allowlist via ``resources:``), then wraps
-    the combined set with the dispatch-time capability gate so every tool
-    call -- regardless of which of these sources it came from -- is checked
-    independent of the model's context.
+    Builds the capability manifest from declared ``tools:``/``mcps:``,
+    adds MCP resource-read tools, then wraps with the dispatch-time gate.
     """
     from deep_agent.aegra.mcp_resource_tools import get_mcp_resource_tools
     from deep_agent.aegra.mcp_tool_auth import wrap_mcp_tools_for_auth
@@ -405,14 +424,15 @@ def _resolve_and_enforce_subagent_tools(
         resolve_capability_manifest,
     )
 
-    # No default here: a `None` (key absent) must stay distinguishable from
-    # an explicit `tools: []` for resolve_capability_manifest's fallback
-    # logic (OFFSEC-384).
+    # None (key absent) vs [] (explicit empty) matters for manifest resolution.
     tool_names: list[str] | None = agent_cfg.get("tools")
     mcp_names: list[str] = agent_cfg.get("mcps", [])
 
+    # Scope pool to this subagent's declared MCP servers before resolution.
+    scoped_tools = _filter_tools_by_mcp_names(tools, mcp_names)
+
     resolved_tools, manifest = resolve_capability_manifest(
-        tool_names, tools, mcp_names, agent_name=name
+        tool_names, scoped_tools, mcp_names, agent_name=name
     )
 
     resource_tools = wrap_mcp_tools_for_auth(
@@ -425,8 +445,6 @@ def _resolve_and_enforce_subagent_tools(
         manifest = manifest.merged_with(t.name for t in resource_tools)
         resolved_tools = [*resolved_tools, *resource_tools]
 
-    # Dispatch-time gate: every tool call is checked against the manifest
-    # above, independent of the model's context (OFFSEC-384).
     return enforce_capability(resolved_tools, manifest)
 
 
