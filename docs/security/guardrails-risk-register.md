@@ -225,52 +225,40 @@ and returns the text with the repeats collapsed to a single copy. It is wired
 into `SafetyAwareRunnable` (`deep_agent/aegra/safety.py`), the same proxy
 that already wraps every orchestrator/subagent call:
 
-- **`astream_events`** (outermost, the SSE production path): accumulates the
-  streamed `on_chat_model_stream` text as it buffers AI chunks; as soon as a
-  loop is detected, it **breaks the underlying stream early** (same mechanism
-  already used to stop a safety-blocked tool retry loop) and emits a single
-  truncated `on_chat_model_stream` chunk instead of the buffered ones —
-  stopping further generation before it consumes unbounded tokens.
-- **`astream`**: applies the same detection to `stream_mode="messages"`
-  chunks, buffering them per model invocation and only forwarding once that
-  invocation's outcome is known — truncating and ending the stream early if
-  a loop is found, so a client never sees any of the repeats.
+- **`astream_events`** (outermost, the SSE production path): piggybacks on
+  the AI-chunk buffer that already exists there for safety-block detection —
+  no additional buffering or latency. Accumulates streamed text per model
+  invocation (keyed by `run_id`); as soon as a loop is detected, it **breaks
+  the underlying stream early** (same mechanism already used to stop a
+  safety-blocked tool retry loop) and emits a single truncated
+  `on_chat_model_stream` chunk instead of the buffered ones — stopping
+  further generation before it consumes unbounded tokens.
 - **`ainvoke`**: runs the detector on the final `AIMessage` (post-hoc, since
   the full response has already been generated) at every nesting level —
   same rationale as the existing tool-block override — so truncated content
   never re-enters conversation state/context even for non-streaming callers.
   Uses `model_copy(update={"content": ...})` so tool_calls, response
   metadata, usage metadata, and the message's id survive the truncation.
+- **`astream`** (the `stream_mode="messages"` path): intentionally left
+  unmodified. An earlier version of this fix buffered chunks here to detect
+  loops, but that required withholding up to ~1600 chars before forwarding
+  anything, which broke incremental streaming for any response shorter than
+  the buffer — a UX regression worse than the rare bug it guarded against.
+  Removed in favor of relying on `astream_events` (the production path) and
+  `ainvoke` (context hygiene) for coverage with zero added latency.
 
 Gated by `REPETITION_LOOP_DETECTION_ENABLED` (default `true`); a warning log
 is emitted whenever a loop is truncated.
 
 **Residual gaps:**
-- `astream_events`/`astream` now scope accumulated text to a single model
-  call, keyed by the event/chunk metadata's `run_id` (reset whenever it
-  changes), instead of accumulating across the whole graph run — this closes
-  the false-positive gap previously noted here. `astream` additionally
-  buffers `stream_mode="messages"` chunks per invocation and only forwards
-  them once that invocation's outcome (loop or not) is decided, so none of a
-  detected loop's repeats reach the client ahead of the truncation.
-- `astream_events`'s replacement event (`repetition_loop_truncated`, like the
-  pre-existing `guardian_refusal` it mirrors) is emitted as a synthetic
-  `on_chat_model_stream` event. Aegra's `stream_graph_events` (v1) derives
-  `"messages"`-mode output for non-JS graphs from `on_chain_stream` chunks at
-  the root run, not from `on_chat_model_stream` — so a client consuming only
-  `stream_mode=["messages"]` (no `"events"`) is served via `astream` (which
-  already avoids this), while a client that also requests `"events"` still
-  sees the correction on the raw events channel. Re-shaping the synthetic
-  event to masquerade as a root `on_chain_stream`/`"messages"` chunk would
-  require depending on `aegra_api`'s internal wire format (e.g. its
-  `run_id` derivation from `config["configurable"]["run_id"]`), which isn't
-  a documented contract and isn't covered by this repo's tests — left as a
-  known limitation rather than risking a fragile, unverified coupling.
+- `astream` does not detect repetition loops at all — a caller using only
+  that path would see a loop stream through untruncated to the client. It
+  is still cleaned from conversation state on the next turn via `ainvoke`.
 - `ainvoke`'s truncation is post-hoc — it prevents truncated garbage from
   re-entering context/state and improves UX, but the tokens for the full
   (looping) generation have already been billed by the provider by the time
-  `ainvoke` sees the result. Only the `astream_events`/`astream` early-break
-  paths actually save generation cost.
+  `ainvoke` sees the result. Only the `astream_events` early-break path
+  actually saves generation cost.
 - Detection is exact-match and bounded to units <= 400 chars
   (`_MAX_UNIT_LEN` in `repetition.py`); a loop built from a longer repeated
   block, or one with minor per-repeat variation (e.g. trailing whitespace
@@ -279,3 +267,7 @@ is emitted whenever a loop is truncated.
   never trips (e.g. thresholds tuned too high for a given deployment), the
   response streams through unmodified — same posture as every other
   guardrail in this register.
+- The feature only activates when `SafetyAwareRunnable` wraps the graph,
+  which currently only happens when guardrails are enabled. This is a
+  pre-existing wiring decision (not introduced by this change); decoupling
+  it is out of scope here.

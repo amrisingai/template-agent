@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from deep_agent.src.agent.repetition import detect_repetition_loop, max_window_chars
+from deep_agent.src.agent.repetition import detect_repetition_loop
 from deep_agent.src.guardrails import (
     TOOL_SAFETY_REFUSAL as _TOOL_SAFETY_REFUSAL,
 )
@@ -38,19 +38,6 @@ def _message_text(content: Any) -> str:
             c.get("text", "") if isinstance(c, dict) else str(c) for c in content
         )
     return str(content) if content else ""
-
-
-def _messages_mode_content(chunk: Any) -> Any | None:
-    """Return the message object from a ``("messages", (message, meta))`` chunk, or None."""
-    if (
-        isinstance(chunk, tuple)
-        and len(chunk) == 2
-        and chunk[0] == "messages"
-        and isinstance(chunk[1], tuple)
-        and len(chunk[1]) == 2
-    ):
-        return chunk[1][0]
-    return None
 
 
 def safety_refusal(exc: BaseException) -> str | None:
@@ -195,86 +182,10 @@ class SafetyAwareRunnable:
             return {"messages": [AIMessage(content=refusal)]}
 
     async def astream(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
-        """Stream chunks, converting safety errors to a refusal message.
-
-        Also detects degenerate repetition loops in
-        ``stream_mode="messages"`` chunks and truncates before they grow
-        unbounded. Other stream-mode shapes pass through unmodified.
-
-        Messages-mode chunks are buffered only while they remain within the
-        trailing detection window (:func:`max_window_chars`). Once a chunk
-        falls outside that window it is forwarded immediately, keeping
-        streaming incremental. Detection is scoped per model invocation
-        (keyed by ``run_id``). If a loop is found, buffered repeats are
-        discarded and a single truncated AIMessage is yielded instead.
-        """
-        pending: list[Any] = []
-        pending_texts: list[str] = []
-        pending_run_id: Any = None
-        repetition_text = ""
-
-        def _flush_all() -> list[Any]:
-            nonlocal pending, pending_texts, repetition_text
-            flushed, pending, pending_texts, repetition_text = pending, [], [], ""
-            return flushed
-
-        def _flush_confirmed_prefix() -> list[Any]:
-            """Forward chunks outside the detection window (confirmed non-repeating)."""
-            nonlocal pending, pending_texts, repetition_text
-            window = max_window_chars()
-            flushed: list[Any] = []
-            while pending and len(repetition_text) - len(pending_texts[0]) >= window:
-                flushed.append(pending.pop(0))
-                oldest_text = pending_texts.pop(0)
-                repetition_text = repetition_text[len(oldest_text) :]
-            return flushed
-
+        """Stream chunks, yielding a refusal message if a safety error is raised."""
         try:
             async for chunk in self._runnable.astream(input, config, **kwargs):
-                if not (self._outermost and settings.REPETITION_LOOP_DETECTION_ENABLED):
-                    yield chunk
-                    continue
-
-                message = _messages_mode_content(chunk)
-                if message is None:
-                    # Non-messages-mode chunk: flush buffered first, then yield.
-                    for buffered in _flush_all():
-                        yield buffered
-                    pending_run_id = None
-                    yield chunk
-                    continue
-
-                _, meta = chunk[1]
-                run_id = meta.get("run_id") if isinstance(meta, dict) else None
-                if run_id != pending_run_id:
-                    # New model invocation — flush the prior one and reset.
-                    for buffered in _flush_all():
-                        yield buffered
-                    pending_run_id = run_id
-
-                text = _message_text(getattr(message, "content", ""))
-                pending.append(chunk)
-                pending_texts.append(text)
-                repetition_text += text
-                is_loop, truncated = detect_repetition_loop(repetition_text)
-                if is_loop:
-                    logger.warning(
-                        "Repetition loop detected in astream; "
-                        "truncating (buffered_chars=%d)",
-                        len(repetition_text),
-                    )
-                    _flush_all()  # Discard buffered repeats.
-                    from langchain_core.messages import AIMessage
-
-                    yield ("messages", (AIMessage(content=truncated), {}))
-                    return
-
-                # No loop yet: forward anything outside the detection window.
-                for buffered in _flush_confirmed_prefix():
-                    yield buffered
-
-            for buffered in _flush_all():
-                yield buffered
+                yield chunk
         except Exception as exc:
             if not self._outermost:
                 raise
