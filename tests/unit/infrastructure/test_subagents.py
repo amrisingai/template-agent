@@ -392,11 +392,13 @@ class TestAgentTypeSystem:
     """Tests for the type field and multi-type subagent dispatch."""
 
     def test_valid_agent_types_constant(self):
+        """VALID_AGENT_TYPES contains the expected type strings."""
         assert "default" in VALID_AGENT_TYPES
         assert "compiled" in VALID_AGENT_TYPES
         assert "async" in VALID_AGENT_TYPES
 
     def test_invalid_type_raises_value_error(self):
+        """An unrecognised agent type raises SubAgentError."""
         with (
             patch(
                 "deep_agent.src.infrastructure.subagents.agent_config.get_all_subagent_configs"
@@ -445,6 +447,7 @@ class TestAgentTypeSystem:
             mock_sa.assert_called_once()
 
     def test_type_default_builds_subagent(self):
+        """type=default dispatches to SubAgent constructor."""
         mock_model = MagicMock()
         mock_subagent = MagicMock()
 
@@ -473,6 +476,7 @@ class TestAgentTypeSystem:
             assert result == [mock_subagent]
 
     def test_type_compiled_builds_compiled_subagent(self):
+        """type=compiled dispatches to CompiledSubAgent constructor."""
         mock_model = MagicMock()
         mock_graph = MagicMock()
         mock_settings = MagicMock()
@@ -519,6 +523,7 @@ class TestAgentTypeSystem:
             )
 
     def test_type_async_builds_async_subagent(self):
+        """type=async dispatches to AsyncSubAgent constructor."""
         with (
             patch(
                 "deep_agent.src.infrastructure.subagents.agent_config.get_all_subagent_configs"
@@ -549,6 +554,7 @@ class TestAgentTypeSystem:
             )
 
     def test_type_async_raises_without_graph_id(self):
+        """Async type without graph_id raises SubAgentError."""
         with (
             patch(
                 "deep_agent.src.infrastructure.subagents.agent_config.get_all_subagent_configs"
@@ -580,6 +586,7 @@ class TestSubagentProviderConfig:
     """Tests for provider-aware model configuration."""
 
     def test_inherits_orchestrator_string_model(self):
+        """Subagent inherits orchestrator model when no model is specified."""
         mock_model = MagicMock()
 
         with (
@@ -916,6 +923,7 @@ class TestGuardianActivationGate:
     """Guardian wrapping requires BOTH guardrail config.enabled AND GUARDIAN_API_BASE."""
 
     def _guardrail_cfg(self, enabled: bool) -> MagicMock:
+        """Build a mock guardrail config with the given enabled flag."""
         cfg = MagicMock()
         cfg.enabled = enabled
         return cfg
@@ -1283,6 +1291,7 @@ class TestMcpResourceToolsOnSubagents:
     def test_default_explicit_tools_still_gets_resource_tools(
         self, _no_mcp_resource_tools
     ):
+        """Default subagent with explicit tools still receives resource tools."""
         resource_tool = MagicMock()
         resource_tool.name = "mcp_list_resources"
         resource_tool.description = "Lists MCP resources"
@@ -1344,6 +1353,7 @@ class TestMcpResourceToolsOnSubagents:
         )
 
     def test_default_passes_agent_mcps_and_resources(self, _no_mcp_resource_tools):
+        """Declared MCPs and resources are forwarded to build_mcp_resource_tools."""
         mock_settings = MagicMock()
         mock_settings.GUARDIAN_API_BASE = ""
         mock_tool = MagicMock()
@@ -1399,6 +1409,7 @@ class TestMcpResourceToolsOnSubagents:
         )
 
     def test_default_resources_empty_allows_all(self, _no_mcp_resource_tools):
+        """Empty resources list passes allowed_uris=None (no filtering)."""
         mock_tool = MagicMock()
         mock_tool.name = "calculate_bmi"
         mock_tool.description = "Calculates BMI"
@@ -1456,6 +1467,7 @@ class TestMcpResourceToolsOnSubagents:
         )
 
     def test_default_inherits_orchestrator_resources(self, _no_mcp_resource_tools):
+        """Subagent without own resources inherits from orchestrator config."""
         mock_settings = MagicMock()
         mock_settings.GUARDIAN_API_BASE = ""
         mock_tool = MagicMock()
@@ -1511,6 +1523,7 @@ class TestMcpResourceToolsOnSubagents:
     def test_compiled_explicit_tools_still_gets_resource_tools(
         self, _no_mcp_resource_tools
     ):
+        """Compiled subagent with explicit tools still receives resource tools."""
         resource_tool = MagicMock()
         resource_tool.name = "mcp_list_resources"
         resource_tool.description = "Lists MCP resources"
@@ -1573,6 +1586,7 @@ class TestMcpResourceToolsOnSubagents:
     def test_async_subagent_does_not_attach_resource_tools(
         self, _no_mcp_resource_tools
     ):
+        """Async subagents run remotely and should not get local resource tools."""
         with (
             patch(
                 "deep_agent.src.infrastructure.subagents.agent_config.get_all_subagent_configs",

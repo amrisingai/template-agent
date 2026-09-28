@@ -85,6 +85,7 @@ class CapabilityToolProxy(BaseTool):
         self._manifest = manifest
 
     def _denied(self) -> bool:
+        """Return True and emit audit if this tool is not in the manifest."""
         if self._manifest.allows(self.name):
             return False
         logger.warning(

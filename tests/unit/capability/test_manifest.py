@@ -14,6 +14,7 @@ from deep_agent.src.capability.manifest import (
 
 
 def _tool(name: str):
+    """Create a MagicMock tool with the given name."""
     tool = MagicMock()
     tool.name = name
     return tool
@@ -25,7 +26,10 @@ def _tool(name: str):
 
 
 class TestCapabilityManifest:
+    """Tests for the CapabilityManifest frozen dataclass."""
+
     def test_allows_returns_true_for_member(self):
+        """Member tool names are authorized."""
         manifest = CapabilityManifest(
             agent_name="orchestrator",
             allowed_tool_names=frozenset({"search", "read_file"}),
@@ -34,6 +38,7 @@ class TestCapabilityManifest:
         assert manifest.allows("search") is True
 
     def test_allows_returns_false_for_non_member(self):
+        """Non-member tool names are denied."""
         manifest = CapabilityManifest(
             agent_name="orchestrator",
             allowed_tool_names=frozenset({"search"}),
@@ -42,12 +47,14 @@ class TestCapabilityManifest:
         assert manifest.allows("delete_everything") is False
 
     def test_allows_returns_false_for_empty_manifest(self):
+        """Empty manifest denies everything."""
         manifest = CapabilityManifest(
             agent_name="orchestrator", allowed_tool_names=frozenset(), source=NONE
         )
         assert manifest.allows("anything") is False
 
     def test_is_frozen(self):
+        """Frozen dataclass rejects attribute assignment."""
         manifest = CapabilityManifest(
             agent_name="a", allowed_tool_names=frozenset(), source=NONE
         )
@@ -55,6 +62,7 @@ class TestCapabilityManifest:
             manifest.agent_name = "b"  # type: ignore[misc]
 
     def test_merged_with_adds_names_without_mutating_original(self):
+        """merged_with returns a new manifest; original stays unchanged."""
         original = CapabilityManifest(
             agent_name="orchestrator",
             allowed_tool_names=frozenset({"search"}),
@@ -79,7 +87,10 @@ class TestCapabilityManifest:
 
 
 class TestResolveCapabilityManifestExplicit:
+    """Tests for explicit tools: list resolution."""
+
     def test_explicit_tools_resolve_to_named_subset(self):
+        """Only named tools are included; undeclared MCP tools are excluded."""
         available = [_tool("search"), _tool("write_file"), _tool("delete_repo")]
 
         tools, manifest = resolve_capability_manifest(
@@ -114,6 +125,8 @@ class TestResolveCapabilityManifestExplicit:
 
 
 class TestResolveCapabilityManifestImplicit:
+    """Tests for the implicit-all-mcp grant when tools: is omitted."""
+
     def test_declared_mcp_servers_without_explicit_tools_grants_all(self):
         """`tools:` genuinely omitted (None) -- not merely an empty list."""
         available = [_tool("search"), _tool("write_file")]
@@ -135,6 +148,7 @@ class TestResolveCapabilityManifestImplicit:
         assert emit.call_args.kwargs["mcp_servers"] == ["some-mcp"]
 
     def test_audit_emit_failure_does_not_raise(self):
+        """Broken audit sink must not crash manifest resolution."""
         available = [_tool("search")]
 
         with patch(
@@ -171,7 +185,10 @@ class TestResolveCapabilityManifestImplicit:
 
 
 class TestResolveCapabilityManifestNone:
+    """Tests for the empty/none manifest path."""
+
     def test_no_tools_and_no_mcp_servers_grants_nothing(self):
+        """Neither tools nor MCP servers yields an empty manifest."""
         tools, manifest = resolve_capability_manifest(
             [], [], mcp_server_names=[], agent_name="orchestrator"
         )
@@ -180,6 +197,7 @@ class TestResolveCapabilityManifestNone:
         assert manifest.allowed_tool_names == frozenset()
 
     def test_mcp_servers_declared_but_no_tools_available_grants_nothing(self):
+        """MCP declared but no tools loaded still yields empty manifest."""
         tools, manifest = resolve_capability_manifest(
             [], [], mcp_server_names=["some-mcp"], agent_name="orchestrator"
         )
@@ -187,6 +205,7 @@ class TestResolveCapabilityManifestNone:
         assert manifest.source == NONE
 
     def test_none_mcp_server_names_is_handled(self):
+        """None mcp_server_names does not raise."""
         tools, manifest = resolve_capability_manifest(
             [], [_tool("search")], mcp_server_names=None, agent_name="orchestrator"
         )
