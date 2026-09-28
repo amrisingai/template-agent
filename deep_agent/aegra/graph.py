@@ -284,7 +284,8 @@ async def agent(runtime: ServerRuntime) -> Any:
     orch_model_raw = orchestrator_cfg.get("model", "gemini-3.1-pro-preview")
     system_prompt = orchestrator_cfg.get("body", "")
     skill_paths = orchestrator_cfg.get("skill_paths", [])
-    tool_names = orchestrator_cfg.get("tools", [])
+    # None (key absent) vs [] (explicit empty) matters for manifest resolution.
+    tool_names = orchestrator_cfg.get("tools")
     mcp_server_names = orchestrator_cfg.get("mcps", [])
 
     # Resolve the personalization user ID to match what the BFF proxy
@@ -363,24 +364,18 @@ async def agent(runtime: ServerRuntime) -> Any:
     mcp_tools = wrap_mcp_tools_for_auth(mcp_tools)
 
     all_available_tools = list(mcp_tools)
-    tools = agent_config.resolve_tools(
-        tool_names, all_available_tools, agent_name=agent_name
+
+    from deep_agent.src.capability import (
+        enforce_capability,
+        resolve_capability_manifest,
     )
-    if mcp_server_names and mcp_tools:
-        resolved_names = {t.name for t in tools}
-        extra = []
-        for tool in mcp_tools:
-            if tool.name not in resolved_names:
-                resolved_names.add(tool.name)
-                extra.append(tool)
-        if extra:
-            logger.info(
-                "Agent '%s' adding %d MCP tool(s) from servers %s",
-                agent_name,
-                len(extra),
-                mcp_server_names,
-            )
-            tools.extend(extra)
+
+    # Capability manifest: resolved once from deploy-time frontmatter.
+    # Explicit 'tools:' is authoritative; agents omitting it get every
+    # tool their declared MCP servers expose (logged as implicit grant).
+    tools, capability_manifest = resolve_capability_manifest(
+        tool_names, all_available_tools, mcp_server_names, agent_name=agent_name
+    )
 
     resource_tools = wrap_mcp_tools_for_auth(
         get_mcp_resource_tools(
@@ -388,7 +383,15 @@ async def agent(runtime: ServerRuntime) -> Any:
             allowed_uris=orchestrator_cfg.get("resources") or None,
         )
     )
-    tools.extend(resource_tools)
+    if resource_tools:
+        # Resource-read tools enforce their own URI allowlist internally
+        # (via `allowed_uris` above); authorize the tool family itself here.
+        capability_manifest = capability_manifest.merged_with(
+            t.name for t in resource_tools
+        )
+        tools.extend(resource_tools)
+
+    tools = enforce_capability(tools, capability_manifest)
 
     from deep_agent.src.infrastructure.middleware import (
         build_middleware_list,
