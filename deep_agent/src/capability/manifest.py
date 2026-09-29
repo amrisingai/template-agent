@@ -96,6 +96,26 @@ def resolve_capability_manifest(
             source=EXPLICIT,
         )
 
+    # Explicit tools: list was provided but nothing resolved — builder
+    # intended a restriction; honour it as an explicit (empty) manifest
+    # so downstream code knows this is deliberate, not absent.
+    if tool_names is not None and len(tool_names) > 0 and not tools:
+        logger.warning(
+            "capability_explicit_empty",
+            agent=agent_name,
+            declared_tools=sorted(tool_names),
+            message=(
+                "Agent declared explicit 'tools:' but none could be resolved "
+                "against available MCP server tools. The agent will have no "
+                "MCP server tools. Verify tool names match MCP tool names."
+            ),
+        )
+        return [], CapabilityManifest(
+            agent_name=agent_name,
+            allowed_tool_names=frozenset(),
+            source=EXPLICIT,
+        )
+
     # Explicit empty list (tools: []) → no tools; only omitted field gets
     # the implicit-all-mcp fallback.
     if tool_names is None and mcp_server_names and available_tools:

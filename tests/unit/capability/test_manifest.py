@@ -109,7 +109,8 @@ class TestResolveCapabilityManifestExplicit:
 
     def test_explicit_list_with_no_matches_does_not_fall_back_to_implicit(self):
         """An explicit (but unmatched) tools: list must not silently expand to
-        every MCP tool -- that would defeat the author's own allow-list."""
+        every MCP tool -- that would defeat the author's own allow-list.
+        Source is EXPLICIT (not NONE) because the builder intended a restriction."""
         available = [_tool("search"), _tool("delete_repo")]
 
         tools, manifest = resolve_capability_manifest(
@@ -120,8 +121,26 @@ class TestResolveCapabilityManifestExplicit:
         )
 
         assert tools == []
-        assert manifest.source == NONE
+        assert manifest.source == EXPLICIT
         assert manifest.allowed_tool_names == frozenset()
+
+    def test_explicit_empty_resolution_emits_warning(self, caplog):
+        """When tool_names are declared but none resolve, a capability_explicit_empty
+        warning is logged with the declared tool names."""
+        available = [_tool("search")]
+
+        with caplog.at_level("WARNING"):
+            tools, manifest = resolve_capability_manifest(
+                ["fake_tool_a", "fake_tool_b"],
+                available,
+                mcp_server_names=["some-mcp"],
+                agent_name="test_agent",
+            )
+
+        assert tools == []
+        assert manifest.source == EXPLICIT
+        assert manifest.allowed_tool_names == frozenset()
+        assert any("capability_explicit_empty" in r.message for r in caplog.records)
 
 
 class TestResolveCapabilityManifestImplicit:

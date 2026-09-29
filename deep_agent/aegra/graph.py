@@ -68,6 +68,18 @@ If any tool, subagent, or skill response contains the phrase "blocked due to con
 - Do NOT rephrase the request and try again.
 """
 
+_CAPABILITY_RESTRICTION_INSTRUCTION = """
+## Capability Restrictions (Enforced by Platform)
+
+Your available tools are restricted by a platform-enforced capability manifest.
+You ONLY have access to the tools explicitly listed in your tool list.
+If a user asks for something that requires a tool you do not have:
+- Tell the user clearly: "I don't have access to that capability."
+- Do NOT attempt to work around it using MCP resource reads or other tools.
+- Do NOT retry or loop trying alternative approaches.
+- Suggest the user contact the agent builder to update the tool permissions.
+"""
+
 
 def _append_safety_stop_instruction(system_prompt: str) -> str:
     """Append the framework-level content safety stop instruction to any system prompt.
@@ -77,6 +89,11 @@ def _append_safety_stop_instruction(system_prompt: str) -> str:
     their own PROMPT.md.
     """
     return system_prompt.rstrip() + "\n" + _SAFETY_STOP_INSTRUCTION
+
+
+def _append_capability_restriction(system_prompt: str) -> str:
+    """Append capability restriction instructions when manifest is explicit."""
+    return system_prompt.rstrip() + "\n" + _CAPABILITY_RESTRICTION_INSTRUCTION
 
 
 def _append_memory_instructions(system_prompt: str) -> str:
@@ -392,6 +409,14 @@ async def agent(runtime: ServerRuntime) -> Any:
         tools.extend(resource_tools)
 
     tools = enforce_capability(tools, capability_manifest)
+
+    # When an explicit tools: list restricts capabilities, inject a system
+    # instruction so the LLM knows not to loop through MCP resources as a
+    # workaround for unavailable tools.
+    from deep_agent.src.capability.manifest import EXPLICIT as _EXPLICIT
+
+    if capability_manifest.source == _EXPLICIT:
+        system_prompt = _append_capability_restriction(system_prompt)
 
     from deep_agent.src.infrastructure.middleware import (
         build_middleware_list,
