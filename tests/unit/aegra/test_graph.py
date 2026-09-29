@@ -1070,6 +1070,42 @@ class TestGraphCacheHit:
         assert mock_subs.call_args.kwargs["tools"] == []
 
     @pytest.mark.asyncio
+    async def test_explicit_manifest_excludes_resource_tools(self):
+        """When manifest is EXPLICIT, resource tools must NOT be merged in —
+        otherwise the LLM uses them to loop around blocked MCP server tools."""
+        mock_compiled = MagicMock()
+        mock_config = self._mock_orch_config(
+            tools=["some_tool"], mcps=["template-mcp-server"]
+        )
+        mock_config.get_mcp_servers.return_value = {
+            "template-mcp-server": {"enabled": True},
+        }
+        # resolve_tools returns empty (tool name doesn't match) — triggers
+        # EXPLICIT-empty path.
+        mock_config.resolve_tools.return_value = []
+
+        (
+            result,
+            mock_compiled,
+            mock_create,
+            mock_mw,
+            mock_subs,
+        ) = await self._build_agent(mock_config)
+
+        assert result is mock_compiled
+        built_names = [t.name for t in mock_create.call_args.kwargs["tools"]]
+        # Resource tools must NOT appear.
+        from deep_agent.aegra.mcp_resource_tools import (
+            LIST_TOOL,
+            READ_TOOL,
+            TEMPLATES_TOOL,
+        )
+
+        assert LIST_TOOL not in built_names
+        assert TEMPLATES_TOOL not in built_names
+        assert READ_TOOL not in built_names
+
+    @pytest.mark.asyncio
     async def test_resources_empty_list_allows_all(self):
         """An empty resources list means no URI filtering is applied."""
         mock_config = self._mock_orch_config(resources=[])

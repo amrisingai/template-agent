@@ -400,9 +400,15 @@ async def agent(runtime: ServerRuntime) -> Any:
             allowed_uris=orchestrator_cfg.get("resources") or None,
         )
     )
-    if resource_tools:
+
+    from deep_agent.src.capability.manifest import EXPLICIT as _EXPLICIT
+
+    if resource_tools and capability_manifest.source != _EXPLICIT:
         # Resource-read tools enforce their own URI allowlist internally
         # (via `allowed_uris` above); authorize the tool family itself here.
+        # When the manifest is EXPLICIT the builder opted into a specific
+        # tool set — resource tools are excluded to prevent the LLM from
+        # using them as a workaround for blocked MCP server tools.
         capability_manifest = capability_manifest.merged_with(
             t.name for t in resource_tools
         )
@@ -413,8 +419,6 @@ async def agent(runtime: ServerRuntime) -> Any:
     # When an explicit tools: list restricts capabilities, inject a system
     # instruction so the LLM knows not to loop through MCP resources as a
     # workaround for unavailable tools.
-    from deep_agent.src.capability.manifest import EXPLICIT as _EXPLICIT
-
     if capability_manifest.source == _EXPLICIT:
         system_prompt = _append_capability_restriction(system_prompt)
 
