@@ -7,7 +7,7 @@ import pytest
 from deep_agent.src.capability.manifest import (
     EXPLICIT,
     IMPLICIT_ALL_MCP,
-    NONE,
+    NO_MANIFEST,
     CapabilityManifest,
     resolve_capability_manifest,
 )
@@ -49,14 +49,16 @@ class TestCapabilityManifest:
     def test_allows_returns_false_for_empty_manifest(self):
         """Empty manifest denies everything."""
         manifest = CapabilityManifest(
-            agent_name="orchestrator", allowed_tool_names=frozenset(), source=NONE
+            agent_name="orchestrator",
+            allowed_tool_names=frozenset(),
+            source=NO_MANIFEST,
         )
         assert manifest.allows("anything") is False
 
     def test_is_frozen(self):
         """Frozen dataclass rejects attribute assignment."""
         manifest = CapabilityManifest(
-            agent_name="a", allowed_tool_names=frozenset(), source=NONE
+            agent_name="a", allowed_tool_names=frozenset(), source=NO_MANIFEST
         )
         with pytest.raises(Exception):
             manifest.agent_name = "b"  # type: ignore[misc]
@@ -110,7 +112,7 @@ class TestResolveCapabilityManifestExplicit:
     def test_explicit_list_with_no_matches_does_not_fall_back_to_implicit(self):
         """An explicit (but unmatched) tools: list must not silently expand to
         every MCP tool -- that would defeat the author's own allow-list.
-        Source is EXPLICIT (not NONE) because the builder intended a restriction."""
+        Source is EXPLICIT (not NO_MANIFEST) because the builder intended a restriction."""
         available = [_tool("search"), _tool("delete_repo")]
 
         tools, manifest = resolve_capability_manifest(
@@ -198,7 +200,7 @@ class TestResolveCapabilityManifestImplicit:
             )
 
         assert tools == []
-        assert manifest.source == NONE
+        assert manifest.source == NO_MANIFEST
         assert manifest.allowed_tool_names == frozenset()
         emit.assert_not_called()
 
@@ -212,7 +214,7 @@ class TestResolveCapabilityManifestNone:
             [], [], mcp_server_names=[], agent_name="orchestrator"
         )
         assert tools == []
-        assert manifest.source == NONE
+        assert manifest.source == NO_MANIFEST
         assert manifest.allowed_tool_names == frozenset()
 
     def test_mcp_servers_declared_but_no_tools_available_grants_nothing(self):
@@ -221,7 +223,7 @@ class TestResolveCapabilityManifestNone:
             [], [], mcp_server_names=["some-mcp"], agent_name="orchestrator"
         )
         assert tools == []
-        assert manifest.source == NONE
+        assert manifest.source == NO_MANIFEST
 
     def test_none_mcp_server_names_is_handled(self):
         """None mcp_server_names does not raise."""
@@ -229,4 +231,4 @@ class TestResolveCapabilityManifestNone:
             [], [_tool("search")], mcp_server_names=None, agent_name="orchestrator"
         )
         assert tools == []
-        assert manifest.source == NONE
+        assert manifest.source == NO_MANIFEST

@@ -392,13 +392,11 @@ class TestAgentTypeSystem:
     """Tests for the type field and multi-type subagent dispatch."""
 
     def test_valid_agent_types_constant(self):
-        """VALID_AGENT_TYPES contains the expected type strings."""
         assert "default" in VALID_AGENT_TYPES
         assert "compiled" in VALID_AGENT_TYPES
         assert "async" in VALID_AGENT_TYPES
 
     def test_invalid_type_raises_value_error(self):
-        """An unrecognised agent type raises SubAgentError."""
         with (
             patch(
                 "deep_agent.src.infrastructure.subagents.agent_config.get_all_subagent_configs"

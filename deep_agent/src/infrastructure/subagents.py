@@ -424,11 +424,8 @@ def _resolve_and_enforce_subagent_tools(
         resolve_capability_manifest,
     )
 
-    # None (key absent) vs [] (explicit empty) matters for manifest resolution.
     tool_names: list[str] | None = agent_cfg.get("tools")
     mcp_names: list[str] = agent_cfg.get("mcps", [])
-
-    # Scope pool to this subagent's declared MCP servers before resolution.
     scoped_tools = _filter_tools_by_mcp_names(tools, mcp_names)
 
     resolved_tools, manifest = resolve_capability_manifest(

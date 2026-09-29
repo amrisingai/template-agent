@@ -26,7 +26,7 @@ logger = get_python_logger()
 
 EXPLICIT = "explicit"
 IMPLICIT_ALL_MCP = "implicit_all_mcp"
-NONE = "none"
+NO_MANIFEST = "no_manifest"
 
 
 @dataclass(frozen=True)
@@ -39,7 +39,7 @@ class CapabilityManifest:
 
     agent_name: str
     allowed_tool_names: frozenset[str]
-    source: str  # EXPLICIT | IMPLICIT_ALL_MCP | NONE
+    source: str  # EXPLICIT | IMPLICIT_ALL_MCP | NO_MANIFEST
 
     def allows(self, tool_name: str) -> bool:
         """Return True if *tool_name* is authorized under this manifest."""
@@ -99,7 +99,7 @@ def resolve_capability_manifest(
     # Explicit tools: list was provided but nothing resolved — builder
     # intended a restriction; honour it as an explicit (empty) manifest
     # so downstream code knows this is deliberate, not absent.
-    if tool_names is not None and len(tool_names) > 0 and not tools:
+    if tool_names and not tools:
         logger.warning(
             "capability_explicit_empty",
             agent=agent_name,
@@ -144,7 +144,7 @@ def resolve_capability_manifest(
         )
 
     return [], CapabilityManifest(
-        agent_name=agent_name, allowed_tool_names=frozenset(), source=NONE
+        agent_name=agent_name, allowed_tool_names=frozenset(), source=NO_MANIFEST
     )
 
 

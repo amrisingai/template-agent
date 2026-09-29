@@ -97,7 +97,6 @@ class CapabilityToolProxy(BaseTool):
         _emit_denied_audit(self.name, self._manifest)
         return True
 
-    # ainvoke is the hot path -- LangGraph's ToolNode calls this.
     async def ainvoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
         """Deny immediately if the tool is outside the manifest; else delegate."""
         if self._denied():

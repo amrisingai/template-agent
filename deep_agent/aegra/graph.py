@@ -301,7 +301,6 @@ async def agent(runtime: ServerRuntime) -> Any:
     orch_model_raw = orchestrator_cfg.get("model", "gemini-3.1-pro-preview")
     system_prompt = orchestrator_cfg.get("body", "")
     skill_paths = orchestrator_cfg.get("skill_paths", [])
-    # None (key absent) vs [] (explicit empty) matters for manifest resolution.
     tool_names = orchestrator_cfg.get("tools")
     mcp_server_names = orchestrator_cfg.get("mcps", [])
 
@@ -387,9 +386,6 @@ async def agent(runtime: ServerRuntime) -> Any:
         resolve_capability_manifest,
     )
 
-    # Capability manifest: resolved once from deploy-time frontmatter.
-    # Explicit 'tools:' is authoritative; agents omitting it get every
-    # tool their declared MCP servers expose (logged as implicit grant).
     tools, capability_manifest = resolve_capability_manifest(
         tool_names, all_available_tools, mcp_server_names, agent_name=agent_name
     )
