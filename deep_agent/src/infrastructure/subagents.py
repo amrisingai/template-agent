@@ -402,8 +402,8 @@ def _filter_tools_by_mcp_names(
     return [
         t
         for t in tools
-        if getattr(t, "metadata", {}).get("mcp_server") in allowed
-        or not getattr(t, "metadata", {}).get("mcp_server")
+        if (getattr(t, "metadata", None) or {}).get("mcp_server") in allowed
+        or not (getattr(t, "metadata", None) or {}).get("mcp_server")
     ]
 
 
